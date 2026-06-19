@@ -17,6 +17,7 @@ type SmplTOC struct {
 // standardOpusFrameMs returns the frame duration (ms) of a standard Opus packet
 // from the config field b>>3 (RFC 6716 Table 2). 2.5 ms is rounded up to 3.
 func standardOpusFrameMs(b byte) int {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/toc.rs::standard_opus_frame_ms
 	config := b >> 3
 	switch {
 	case config < 12: // SILK NB/MB/WB
@@ -39,6 +40,7 @@ func standardOpusFrameMs(b byte) int {
 
 // ParseSmplTOC decodes the TOC byte at the head of an inbound MLow frame.
 func ParseSmplTOC(b byte) SmplTOC {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/toc.rs::parse_mlow_toc
 	if b&0xC0 == 0xC0 {
 		return SmplTOC{
 			StdOpus:    true,

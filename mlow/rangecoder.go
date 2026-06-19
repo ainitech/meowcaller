@@ -15,9 +15,13 @@ const (
 )
 
 // ilog is floor(log2(x))+1 for x>0 and 0 for x==0.
-func ilog(x uint32) int32 { return int32(bits.Len32(x)) }
+func ilog(x uint32) int32 {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::ilog
+	return int32(bits.Len32(x))
+}
 
 func ecMini(a, b uint32) uint32 {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::ec_mini
 	if a < b {
 		return a
 	}
@@ -44,6 +48,7 @@ type RangeDecoder struct {
 
 // NewRangeDecoder initializes a decoder over buf.
 func NewRangeDecoder(buf []byte) *RangeDecoder {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::RangeDecoder::new
 	d := &RangeDecoder{
 		buf:        buf,
 		storage:    uint32(len(buf)),
@@ -57,6 +62,7 @@ func NewRangeDecoder(buf []byte) *RangeDecoder {
 }
 
 func (d *RangeDecoder) readByte() uint32 {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::RangeDecoder::read_byte
 	if d.offs < d.storage {
 		b := d.buf[d.offs]
 		d.offs++
@@ -66,6 +72,7 @@ func (d *RangeDecoder) readByte() uint32 {
 }
 
 func (d *RangeDecoder) readByteFromEnd() uint32 {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::RangeDecoder::read_byte_from_end
 	if d.endOffs < d.storage {
 		d.endOffs++
 		return uint32(d.buf[d.storage-d.endOffs])
@@ -74,6 +81,7 @@ func (d *RangeDecoder) readByteFromEnd() uint32 {
 }
 
 func (d *RangeDecoder) normalize() {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::RangeDecoder::normalize
 	for d.rng <= ecCodeBot {
 		d.nbitsTotal += ecSymBits
 		d.rng <<= ecSymBits
@@ -87,6 +95,7 @@ func (d *RangeDecoder) normalize() {
 // Decode returns the cumulative frequency in [0, ft) for the next symbol; the
 // caller locates the symbol and calls Update.
 func (d *RangeDecoder) Decode(ft uint32) uint32 {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::RangeDecoder::decode
 	if ft == 0 {
 		d.Err = 1
 		d.ext = 1
@@ -103,6 +112,7 @@ func (d *RangeDecoder) Decode(ft uint32) uint32 {
 }
 
 func (d *RangeDecoder) decodeBin(bitsN uint32) uint32 {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::RangeDecoder::decode_bin
 	d.ext = d.rng >> bitsN
 	if d.ext == 0 {
 		d.Err = 1
@@ -116,6 +126,7 @@ func (d *RangeDecoder) decodeBin(bitsN uint32) uint32 {
 
 // DecodeRawSymbol decodes a uniform nbits-bit symbol directly off the range stream.
 func (d *RangeDecoder) DecodeRawSymbol(nbits uint32) uint32 {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::RangeDecoder::decode_raw_symbol
 	sym := d.decodeBin(nbits)
 	d.Update(sym, sym+1, uint32(1)<<nbits)
 	return sym
@@ -123,6 +134,7 @@ func (d *RangeDecoder) DecodeRawSymbol(nbits uint32) uint32 {
 
 // Update advances past the symbol with cumulative range [fl, fh) out of ft.
 func (d *RangeDecoder) Update(fl, fh, ft uint32) {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::RangeDecoder::update
 	s := d.ext * (ft - fh)
 	d.val -= s
 	if fl > 0 {
@@ -135,6 +147,7 @@ func (d *RangeDecoder) Update(fl, fh, ft uint32) {
 
 // BitLogp decodes one bit with P(0) = 1/2^logp.
 func (d *RangeDecoder) BitLogp(logp uint32) int32 {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::RangeDecoder::bit_logp
 	r := d.rng
 	dv := d.val
 	s := r >> logp
@@ -154,6 +167,7 @@ func (d *RangeDecoder) BitLogp(logp uint32) int32 {
 
 // DecodeICDF decodes a symbol against an inverse-CDF table; ftb = log2(ft).
 func (d *RangeDecoder) DecodeICDF(icdf []byte, ftb uint32) int32 {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::RangeDecoder::decode_icdf
 	if len(icdf) == 0 {
 		d.Err = 1
 		return 0
@@ -181,6 +195,7 @@ func (d *RangeDecoder) DecodeICDF(icdf []byte, ftb uint32) int32 {
 // DecodeCDF decodes a symbol against a uint16 cumulative CDF table; the effective
 // total is cdf[n-1]-cdf[0].
 func (d *RangeDecoder) DecodeCDF(cdf []uint16) int32 {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::RangeDecoder::decode_cdf
 	n := len(cdf)
 	if n < 2 {
 		d.Err = 1
@@ -207,6 +222,7 @@ func (d *RangeDecoder) DecodeCDF(cdf []uint16) int32 {
 
 // BitsN reads n raw bits from the back of the buffer, LSB-first.
 func (d *RangeDecoder) BitsN(n uint32) uint32 {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::RangeDecoder::bits_n
 	window := d.endWindow
 	available := d.nendBits
 	if uint32(available) < n {
@@ -229,6 +245,7 @@ func (d *RangeDecoder) BitsN(n uint32) uint32 {
 
 // DecodeUint decodes an integer uniformly distributed in [0, ft0) for ft0 > 1.
 func (d *RangeDecoder) DecodeUint(ft0 uint32) uint32 {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::RangeDecoder::decode_uint
 	ft := ft0 - 1
 	ftb := ilog(ft)
 	if ftb > ecUintBits {
@@ -251,6 +268,7 @@ func (d *RangeDecoder) DecodeUint(ft0 uint32) uint32 {
 
 // Decode64FineSym decodes the 64-symbol uniform fine-lag value.
 func (d *RangeDecoder) Decode64FineSym() int32 {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::RangeDecoder::decode_64_fine_sym
 	d.ext = d.rng >> 6
 	if d.ext == 0 {
 		d.Err = 1
@@ -270,6 +288,7 @@ func (d *RangeDecoder) Decode64FineSym() int32 {
 
 // Tell reports the number of bits consumed so far, rounded up.
 func (d *RangeDecoder) Tell() int32 {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::RangeDecoder::tell
 	return d.nbitsTotal - ilog(d.rng)
 }
 
@@ -293,6 +312,7 @@ type RangeEncoder struct {
 
 // NewRangeEncoder allocates an encoder writing into a size-byte buffer.
 func NewRangeEncoder(size int) *RangeEncoder {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::RangeEncoder::new
 	return &RangeEncoder{
 		buf:        make([]byte, size),
 		storage:    uint32(size),
@@ -303,9 +323,13 @@ func NewRangeEncoder(size int) *RangeEncoder {
 }
 
 // Err returns the sticky encode error (-1 on failure).
-func (e *RangeEncoder) Err() int32 { return e.err }
+func (e *RangeEncoder) Err() int32 {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::RangeEncoder::err
+	return e.err
+}
 
 func (e *RangeEncoder) writeByte(b uint32) {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::RangeEncoder::write_byte
 	if e.offs+e.endOffs < e.storage {
 		e.buf[e.offs] = byte(b)
 		e.offs++
@@ -315,6 +339,7 @@ func (e *RangeEncoder) writeByte(b uint32) {
 }
 
 func (e *RangeEncoder) writeByteAtEnd(b uint32) {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::RangeEncoder::write_byte_at_end
 	if e.offs+e.endOffs < e.storage {
 		e.endOffs++
 		e.buf[e.storage-e.endOffs] = byte(b)
@@ -324,6 +349,7 @@ func (e *RangeEncoder) writeByteAtEnd(b uint32) {
 }
 
 func (e *RangeEncoder) carryOut(c int32) {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::RangeEncoder::carry_out
 	if uint32(c) != ecSymMax {
 		carry := c >> ecSymBits
 		if e.rem >= 0 {
@@ -346,6 +372,7 @@ func (e *RangeEncoder) carryOut(c int32) {
 }
 
 func (e *RangeEncoder) normalize() {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::RangeEncoder::normalize
 	for e.rng <= ecCodeBot {
 		e.carryOut(int32(e.val >> ecCodeShift))
 		e.val = (e.val << ecSymBits) & (ecCodeTop - 1)
@@ -356,6 +383,7 @@ func (e *RangeEncoder) normalize() {
 
 // Encode encodes the symbol with cumulative range [fl, fh) out of ft.
 func (e *RangeEncoder) Encode(fl, fh, ft uint32) {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::RangeEncoder::encode
 	if ft == 0 {
 		e.err = -1
 		return
@@ -372,6 +400,7 @@ func (e *RangeEncoder) Encode(fl, fh, ft uint32) {
 
 // BitLogp encodes one bit with P(0) = 1/2^logp.
 func (e *RangeEncoder) BitLogp(val int32, logp uint32) {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::RangeEncoder::bit_logp
 	r := e.rng
 	l := e.val
 	s := r >> logp
@@ -387,6 +416,7 @@ func (e *RangeEncoder) BitLogp(val int32, logp uint32) {
 
 // EncodeICDF encodes symbol s against an inverse-CDF table; ftb = log2(ft).
 func (e *RangeEncoder) EncodeICDF(s int32, icdf []byte, ftb uint32) {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::RangeEncoder::encode_icdf
 	r := e.rng >> ftb
 	if s > 0 {
 		e.val += e.rng - r*uint32(icdf[s-1])
@@ -399,6 +429,7 @@ func (e *RangeEncoder) EncodeICDF(s int32, icdf []byte, ftb uint32) {
 
 // EncodeCDF encodes symbol s against a uint16 cumulative CDF table.
 func (e *RangeEncoder) EncodeCDF(s int32, cdf []uint16) {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::RangeEncoder::encode_cdf
 	n := len(cdf)
 	if n < 2 || s < 0 || int(s+1) >= n {
 		e.err = -1
@@ -415,6 +446,7 @@ func (e *RangeEncoder) EncodeCDF(s int32, cdf []uint16) {
 
 // BitsN writes the low n bits of fl as raw bits toward the back of the buffer.
 func (e *RangeEncoder) BitsN(fl, n uint32) {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::RangeEncoder::bits_n
 	window := e.endWindow
 	used := e.nendBits
 	if used+int32(n) > ecWindowSize {
@@ -436,6 +468,7 @@ func (e *RangeEncoder) BitsN(fl, n uint32) {
 
 // EncodeUint encodes an integer uniformly distributed in [0, ft0).
 func (e *RangeEncoder) EncodeUint(fl, ft0 uint32) {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::RangeEncoder::encode_uint
 	ft := ft0 - 1
 	ftb := ilog(ft)
 	if ftb > ecUintBits {
@@ -450,17 +483,20 @@ func (e *RangeEncoder) EncodeUint(fl, ft0 uint32) {
 
 // EncodeRawSymbol encodes a uniform nbits-bit symbol on the range stream.
 func (e *RangeEncoder) EncodeRawSymbol(sym, nbits uint32) {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::RangeEncoder::encode_raw_symbol
 	e.Encode(sym, sym+1, uint32(1)<<nbits)
 }
 
 // Encode64FineSym encodes the 64-symbol uniform fine-lag value.
 func (e *RangeEncoder) Encode64FineSym(sym int32) {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::RangeEncoder::encode_64_fine_sym
 	e.Encode(uint32(sym), uint32(sym)+1, 64)
 }
 
 // Done flushes the range coder and merges the back raw-bit stream. After this,
 // Bytes is the finished payload.
 func (e *RangeEncoder) Done() {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::RangeEncoder::done
 	l := int32(ecCodeBits) - ilog(e.rng)
 	msk := uint32(ecCodeTop-1) >> uint32(l)
 	end := (e.val + msk) &^ msk
@@ -499,8 +535,14 @@ func (e *RangeEncoder) Done() {
 }
 
 // Bytes returns the encoder's output buffer.
-func (e *RangeEncoder) Bytes() []byte { return e.buf }
+func (e *RangeEncoder) Bytes() []byte {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::RangeEncoder::bytes
+	return e.buf
+}
 
 // ConsumedLen reports the meaningful body length: front range bytes plus back
 // raw-bit bytes (the gap between is zero-fill padding).
-func (e *RangeEncoder) ConsumedLen() int { return int(e.offs + e.endOffs) }
+func (e *RangeEncoder) ConsumedLen() int {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/rangecoder.rs::RangeEncoder::consumed_len
+	return int(e.offs + e.endOffs)
+}

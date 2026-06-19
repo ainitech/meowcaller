@@ -11,6 +11,7 @@ const (
 // producing the windowed buffer the autocorrelation FFT consumes. useLongWin
 // selects the 64-tap vs 32-tap trailing cosine taper.
 func smplWindowLPC20(input *[SmplLPCBufLen]float32, useLongWin bool) [SmplLPCBufLen]float32 {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/smpl_lpc.rs::smpl_window_lpc20
 	// TODO
 	// agent suggestion: gen_sin_win(264) over the head, copy the 120-sample middle
 	// verbatim, gen_cos_win taper over the trailing 64 (or 32, zeroing the last 32
@@ -24,6 +25,7 @@ func smplWindowLPC20(input *[SmplLPCBufLen]float32, useLongWin bool) [SmplLPCBuf
 // the post-bandwidth-expansion monic LPC A[0..16] (A[0]=1) and the power spectrum
 // F2[0..256] that the pitch and signal-mode paths consume.
 func smplLPCAnalyzeWithF2(windowed *[SmplLPCBufLen]float32) ([SmplLPCOrder + 1]float32, [SmplFLen]float32) {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/smpl_lpc.rs::smpl_lpc_analyze_with_f2
 	// TODO
 	// agent suggestion: zero-pad to 512, forward real FFT, power spectrum F2, cast
 	// to f64, brute_dct → R[0..16], ac2rc_dbl (Schur, reg=5e-7) → rc, rc2a → monic
@@ -40,6 +42,7 @@ func smplLPCInterpol(
 	lsf, prevLSF []float32,
 	nlsf2a func(nlsf []float32) []float32,
 ) (predcoefs [4][SmplLPCOrder + 1]float32, ilsf [SmplLPCOrder]float32) {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/smpl_lpc.rs::smpl_lpc_interpol
 	// TODO
 	// agent suggestion: delegate to smplLPCInterpolIdx with interpolIdx=0.
 	// human input:
@@ -52,6 +55,7 @@ func smplLPCInterpolIdx(
 	interpolIdx int,
 	nlsf2a func(nlsf []float32) []float32,
 ) (predcoefs [4][SmplLPCOrder + 1]float32, ilsf [SmplLPCOrder]float32) {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/smpl_lpc.rs::smpl_lpc_interpol_idx
 	// TODO
 	// agent suggestion: pick the interp row (clamp idx to 1); seed prev from prevLSF
 	// when its last entry is non-zero else from lsf; per subframe interpolate
@@ -64,6 +68,7 @@ func smplLPCInterpolIdx(
 // smplA2NLSF16 converts post-BWE float LPC A[0..16] (A[0]=1) into the analysis
 // NLSF in radians (0..pi) via the fixed-point silk forward A→NLSF.
 func smplA2NLSF16(a []float32) [SmplLPCOrder]float32 {
+	// Source of truth: whatsapp-rust-voip wacore/src/voip/mlow/smpl_lpc.rs::smpl_a2nlsf_16
 	// TODO
 	// agent suggestion: a_q16[i] = round(-a[i+1]*65536); run the bit-exact
 	// silk_a2nlsf (eval-poly root search over silkLSFCosTabFIXQ12, bwexpander on
