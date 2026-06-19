@@ -9,9 +9,10 @@ LTP gains and pitch lags for one frame, and the encoder-side pitch ESTIMATOR tha
 searches for those lags. Media layer (codec pitch/LTP).
 
 **Validation vectors:** `pitch_vectors.json` (decode side: gains, filters, lag,
-contour, per-subframe `int_lag_q6`) and `c_pitch_full.json` (estimator side:
-`pitchcorr`, `avg_lag`, per-subframe `laginds`, `blockseg_idx`, `harm_strength`).
-Copy both verbatim into `mlow/testdata/`.
+contour, per-subframe `int_lag_q6`) and `pitchio_ground_truth.json` (estimator side:
+`pitchcorr`, `avg_lag`, per-subframe `laginds`, `blockseg_idx`, `harm_strength` — the
+C ground truth `smpl_pitch_enc.rs`'s `pitch_estimator_matches_c_ground_truth` reads).
+Copy each into `mlow/testdata/` when its half is scaffolded — not before.
 
 ## Reference source (verbatim — authoritative)
 
