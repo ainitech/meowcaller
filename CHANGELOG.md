@@ -8,10 +8,12 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
 ## [Unreleased]
 
 ### mlow/rangecoder
-- scaffolded: RangeDecoder + RangeEncoder types and all method signatures with
-  TODO bodies; four KAT tests wired to testdata/rc_vectors.json (2000-op
-  icdf/raw/bit_logp/uint script + 1500-op CDF script, decode + re-encode). Bodies
-  are TODO; tests fail until implemented.
+- KAT-verified: decoder replays the 2000-op and 1500-op CDF scripts to the listed
+  values; encoder re-encodes both byte-identically to rc_vectors.json (4/4 tests).
+- implemented: full RangeDecoder + RangeEncoder bodies (ec_dec/ec_enc) as a
+  uint32-modular port; sticky Err/err fields, no error returns.
+- scaffolded: RangeDecoder + RangeEncoder types and all method signatures; four
+  KAT tests wired to testdata/rc_vectors.json (decode + re-encode).
 
 ### mlow/toc
 - KAT-verified: ParseSmplTOC matches toc_vectors.json (256/256 byte values).
