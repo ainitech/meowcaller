@@ -96,10 +96,17 @@ static SMPL_SYNTH_TABLES: OnceLock<SmplSynthTables> = OnceLock::new();
 
 pub(crate) fn load_smpl_synth_tables() -> &'static SmplSynthTables {
     SMPL_SYNTH_TABLES.get_or_init(|| {
-        serde_json::from_str(include_str!("testdata/smpl_synth_tables.json"))
-            .expect("smpl_synth_tables.json must parse")
+        // zlib+protobuf (tables.proto `SmplSynthTables`) so the byte-identical blob loads in Go.
+        let pb: PbSmplSynthTables =
+            super::smpl_tables_blob::load_blob_prost(include_bytes!("testdata/smpl_synth_tables.bin"));
+        pb_into_synth(pb)
     })
 }
+
+// A prost mirror (`PbSmplSynthTables`, built on the shared nested-float `F2`..`F5` wrappers) plus
+// `pb_into_synth`/`synth_to_pb_bytes` convert between the wire form and the runtime struct. Bodies
+// elided here; see tables.proto and the smpl_synth.rs mirror. Go asset: embed the reference's
+// `smpl_synth_tables.bin` at the meowcaller package root and decode via `internal/tables`.
 
 /// func 3530 (silk_NLSF_VQ_weights_laroia): inverse-gap weights w[k] = invgap[k] + invgap[k+1].
 fn smpl_nlsf_laroia_weights(nlsf: &[f32], out: &mut [f32]) {
@@ -1597,5 +1604,8 @@ func QuantNrgRes4(nrgres *[4]float32) NrgResQuant
   separate datasheets; wire the Go package's equivalents in by their envelope
   signatures.
 - Errors: the reference does not return errors from the synthesis path (it
-  `expect`s only when loading the JSON tables). `TODO(human):` decide whether table
-  loading returns an error or panics in Go.
+  `expect`s only when decoding the table blob). Settled (matches mem/lsf): the Go
+  loader panics on a malformed embedded blob — it is a build artifact, not user
+  input — memoized with `sync.Once`; the asset is the reference's
+  `smpl_synth_tables.bin` (zlib+protobuf `SmplSynthTables`) embedded at the package
+  root and decoded via `internal/tables`.

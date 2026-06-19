@@ -356,101 +356,18 @@ static TABLES: OnceLock<PitchTables> = OnceLock::new();
 
 pub(crate) fn load_pitch_tables() -> &'static PitchTables {
     TABLES.get_or_init(|| {
-        let v: serde_json::Value =
-            serde_json::from_str(include_str!("testdata/smpl_pitch_tables.json"))
-                .expect("pitch tables json");
-        let as_usize = |x: &serde_json::Value| x.as_i64().unwrap() as usize;
-        let as_u32 = |x: &serde_json::Value| x.as_i64().unwrap() as u32;
-        let blocksegs = v["blocksegs"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|s| BlockSeg {
-                nblocks: as_usize(&s["nblocks"]),
-                blocks: s["blocks"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(as_usize)
-                    .collect(),
-                seglens: s["seglens"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(as_usize)
-                    .collect(),
-            })
-            .collect();
-        let blocktracks = v["blocktracks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|t| {
-                let mut track = [0usize; NUM_SUBFRAMES];
-                for (i, e) in t["track"].as_array().unwrap().iter().enumerate() {
-                    track[i] = as_usize(e);
-                }
-                BlockTrack {
-                    track,
-                    meanblock: t["meanblock"].as_f64().unwrap() as f32,
-                    trackdeltas: t["trackdeltas"].as_f64().unwrap() as f32,
-                }
-            })
-            .collect();
-        let blocksegs2idx = v["blocksegs2idx"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(as_usize)
-            .collect();
-        let blockseg_idx_cmf = v["blockseg_idx_CMF"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(as_u32)
-            .collect();
-        let delta_lag_cmfs = v["delta_lag_CMFs"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|row| row.as_array().unwrap().iter().map(as_u32).collect())
-            .collect();
-        let blocksegs_ix = v["blocksegs_ix"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|p| {
-                let a = p.as_array().unwrap();
-                [as_usize(&a[0]), as_usize(&a[1])]
-            })
-            .collect();
-        let firstblock_range = v["firstblock_range"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|p| {
-                let a = p.as_array().unwrap();
-                [as_usize(&a[0]), as_usize(&a[1])]
-            })
-            .collect();
-        let block_transition_cmf = v["block_transition_CMF"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|row| row.as_array().unwrap().iter().map(as_u32).collect())
-            .collect();
-        PitchTables {
-            blocksegs,
-            blocktracks,
-            blocksegs2idx,
-            blockseg_idx_cmf,
-            delta_lag_cmfs,
-            blocksegs_ix,
-            firstblock_range,
-            block_transition_cmf,
-        }
+        // zlib+protobuf (tables.proto `PitchTables`) so the byte-identical blob loads in Go.
+        let pb: PbPitchTables =
+            super::smpl_tables_blob::load_blob_prost(include_bytes!("testdata/smpl_pitch_tables.bin"));
+        pb_into_pitch(pb)
     })
 }
+
+// The JSON->struct parse above moved to the cfg(test) `parse_pitch_tables_json` (generator-only);
+// the runtime path decodes the protobuf blob. A prost mirror (`PbPitchTables`/`PbBlockSeg`/
+// `PbBlockTrack`, using the shared `U1` int-list) + `pb_into_pitch`/`pitch_to_pb_bytes` convert
+// between the wire form (usize widened to u32) and the runtime struct. Bodies elided here; see
+// tables.proto and the smpl_pitch_enc.rs mirror.
 
 /// Per-stream estimator state (the C `PitchEstimator` non-scratch fields). `prev_lagblk/prev_lagidx`
 /// are reset to -1 at frame boundaries by the encoder (`smpl_pitch_reset_cond`).
@@ -1467,7 +1384,11 @@ func SmplPitch(st *PitchEstState, ltpBuf []float32, f2 *[FLen]float32, codedAsAc
   — a faithful port inherits the same ~0.03 gap. The DECODER pitch (`pitch_match_go`)
   does pass and is an exact target. Decide the estimator's acceptance tolerance with
   a human before treating this module "done".
-  `TODO(human):` decide the Go embedding strategy for `smpl_pitch_tables.json` and
-  confirm the `RangeDecoder`/`SmplMem`/`SmplLsfState` surfaces (including
-  `decode_64_fine_sym`, `prev_gain_idx`, `prev_filt_idx`, `prev_lag`, `prev_frac_lag`)
-  exist before wiring either half.
+  Asset (settled): `smpl_pitch_tables` is a zlib+protobuf `PitchTables` blob
+  (`tables.proto`). Embed the reference's `smpl_pitch_tables.bin` at the meowcaller
+  package root (production asset, the reference's filename, like `smpl_cc_blob.bin`)
+  and decode with inflate + `proto.Unmarshal` + the generated `internal/tables`
+  bindings; the KAT JSON stays in `testdata/`. Confirm the
+  `RangeDecoder`/`SmplMem`/`SmplLsfState` surfaces (including `decode_64_fine_sym`,
+  `prev_gain_idx`, `prev_filt_idx`, `prev_lag`, `prev_frac_lag`) exist before wiring
+  either half.

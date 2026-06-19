@@ -88,11 +88,17 @@ static LSF_CB: OnceLock<LsfCb> = OnceLock::new();
 
 pub(crate) fn load_lsf_cb() -> &'static LsfCb {
     LSF_CB.get_or_init(|| {
-        let j: LsfCbJson = serde_json::from_str(include_str!("testdata/lsf_cb_dump.json"))
-            .expect("lsf_cb_dump.json");
-        LsfCb { j }
+        // zlib+protobuf (tables.proto `LsfCb`) so the byte-identical blob loads in Go.
+        let pb: PbLsfCb =
+            super::smpl_tables_blob::load_blob_prost(include_bytes!("testdata/lsf_cb_dump.bin"));
+        LsfCb { j: pb_into_lsf_cb_json(pb) }
     })
 }
+
+// The JSON parse moved to the cfg(test) `parse_lsf_cb_json` (generator-only). A prost mirror
+// (`PbLsfCb`/`PbLsfCbSt1`/`PbLsfCbSt2*`, built on the shared `F2`/`F3` float and `I4` int wrappers)
+// + `pb_into_lsf_cb_json`/`lsf_cb_to_pb_bytes` convert between the wire form and `LsfCbJson`. Bodies
+// elided here; see tables.proto and the smpl_lsf_quant.rs mirror.
 
 // ----- vector helpers (faithful ports) -----
 
@@ -662,9 +668,12 @@ func LsfQuantCond(a, nlsf, lsfqPrev []float32, voiced, lowRate int, rdWAdj float
 - `f32::round()` rounds half-away-from-zero; Go's `math.Round` matches that. The
   reference build uses `SMPL_USE_SPEC_LSW_WEIGHT`, so the RD weight is the spectral
   inverse-envelope, not Laroia. `lsf_weights_laroia` is only used by the cond path.
-- The codebook loader pulls a large JSON fixture once. `TODO(human):` decide how the
-  Go build embeds and parses that fixture (`go:embed` + `encoding/json`, or a
-  generated table) and whether to memoize with `sync.Once`.
+- The codebook is a zlib+protobuf `LsfCb` blob (`tables.proto`). Settled (matches
+  `smpl_tables`/`smpl_cc_blob`): embed the reference's `lsf_cb_dump.bin` at the
+  meowcaller **package root** (production asset, the reference's filename — not
+  `testdata/`), decode with inflate + `proto.Unmarshal` + the generated
+  `internal/tables` bindings, narrowing u32→u16 / nested wrappers back to the native
+  Go layout, memoized with `sync.Once`. The KAT JSON stays in `testdata/`.
 - The trailing `lsf_min_dist` 1000-iteration loop falls through best-effort instead
   of asserting; preserve the fall-through (do not panic) so malformed input cannot
   crash the encoder.

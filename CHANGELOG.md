@@ -7,6 +7,24 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
 
 ## [Unreleased]
 
+### reference — all mlow runtime tables migrated to protobuf (reference `ed12f35`)
+- Drove a reference refactor (`refactor(voip): store all mlow runtime tables as
+  protobuf`, `ed12f35`, pushed) migrating the three remaining postcard table blobs —
+  `smpl_synth_tables`, `lsf_cb_dump`, `smpl_pitch_tables` — to zlib+protobuf
+  (`tables.proto`), joining `smpl_tables` and the cc_blob. **Every** mlow runtime
+  constant table is now protobuf, so each byte-identical blob loads in the Go port
+  (postcard is Rust-only). Added reusable nested wrapper messages (`F1..F5` float,
+  `U1`/`I1..I4` int) plus per-table messages (`SmplSynthTables`, `PitchTables`,
+  `LsfCb`); the runtime structs keep their native shape, converted at the load/gen
+  boundary. Dropped the now-unused `postcard` dependency and the dead
+  `load_blob`/`make_blob` helpers. Blobs regenerated; decode is bit-identical (full
+  reference suite green except the pre-existing golden encoder-path divergence).
+- Datasheets `mlow-synth`, `mlow-pitch`, `mlow-lsf_quant` updated: loaders shown as
+  `load_blob_prost` + prost-mirror note, and the Go-asset `TODO(human)`s resolved to
+  the settled convention (production blob at the package root under the reference's
+  filename; KAT JSON stays in `testdata/`). No meowcaller code change yet — the
+  per-module proto messages/blobs land when each Go module is built.
+
 ### mlow/lsf_quant — module #06 scaffold (reference `c697c36`)
 - Scaffolded the encoder-side LSF vector quantizer envelope: `LsfQuantResult`,
   `LsfCb` (codebook data layout mirroring the reference `LsfCbJson`), and the public
