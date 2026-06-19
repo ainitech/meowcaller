@@ -66,6 +66,14 @@ If the datasheet for the module does not exist yet, write it first (embed the
 reference source verbatim + the Go target, per `datasheets/_TEMPLATE.md`), get it
 reviewed, and only then scaffold. Datasheets are written one module at a time.
 
+**Datasheets are always kept current with the pinned reference.** The embedded
+verbatim is the ground truth, so it must match the reference commit the SOT
+permalinks point at — never a stale snapshot. Whenever the reference is re-synced
+(new commit pulled / new pin), re-verify every datasheet's verbatim against the
+current source and refresh any that diverged, **before** building from it. A module
+must never be implemented from a stale datasheet. When in doubt, re-diff the
+embedded source against the current file and reconcile.
+
 Each arrow `→ PAUSE` is a real stop: hand control back to the human. Do not chain
 steps without approval.
 

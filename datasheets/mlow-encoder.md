@@ -12,7 +12,6 @@ stream order. Copy it verbatim into `mlow/testdata/`.
 
 ## Reference source (verbatim — authoritative)
 
-
 ### `encode.rs`
 
 ```rust
@@ -141,6 +140,8 @@ fn encode_smpl_lsf(
         st.prev_filt_idx = -1;
         st.prev_lag = -1;
         st.prev_frac_lag = -1;
+        st.prev_lagblk = -1;
+        st.prev_lagidx = -1;
     }
     st.prev_stage1 = stage1;
 
@@ -395,84 +396,88 @@ fn encode_smpl_pitch(
     }
     let avg_gain = gain_accum / p3;
 
-    let pcfg = mem.g_clk.wrapping_add(0x5704);
-    let num_contours = mem.u32(pcfg.wrapping_add(22240)) as i32;
-    let lag_cdf = mem.u32(pcfg.wrapping_add(22248));
-    let frac_base = mem.u32(pcfg.wrapping_add(22252));
-    let delta_cdf = mem.u32(pcfg.wrapping_add(22268));
-
-    if st.prev_lag < 0 {
-        enc.encode_cdf(
-            pp.lag_abs_sym,
-            &mem.cdf_at(lag_cdf, (num_contours + 1) as usize),
-        );
-    } else {
-        let di = pp.lag_delta_sym;
-        enc.encode_cdf(
-            di,
-            &mem.cdf_at(delta_cdf.wrapping_add((st.prev_lag as u32) * 20), 10),
-        );
-        let lo = mem.u8(0xe7ef0u32.wrapping_add((di as u32) * 2)) as i32;
-        let hi = mem.u8(0xe7ef0u32.wrapping_add((di as u32) * 2 + 1)) as i32;
-        let r_n = ((hi - lo) + 2) as usize;
-        enc.encode_cdf(
-            pp.lag_ref_sym,
-            &mem.cdf_at(lag_cdf.wrapping_add((lo as u32) * 2), r_n),
-        );
-    }
-
-    let contour = pp.contour;
-    if contour < 0 || contour >= num_contours {
-        return;
-    }
-    let ctr_base = pcfg.wrapping_add((contour as u32).wrapping_mul(0x44));
-    let base_lag = mem.i32(ctr_base.wrapping_add(0x1d38));
-
-    let mut cur_lag2 = base_lag;
-    let mut read_fine = true;
-    if st.prev_lag >= 0 {
-        let delta = base_lag - st.prev_lag;
-        if (-1..3).contains(&delta) {
-            read_fine = false;
-        }
-    }
-    if read_fine {
-        let sym = pp.fine_sym;
-        enc.encode(sym as u32, sym as u32 + 1, 64);
-        cur_lag2 = (base_lag << 6) + sym;
-        st.prev_frac_lag = cur_lag2;
-        st.prev_lag = base_lag;
-    }
-
-    let cnt2 = mem.i32(ctr_base.wrapping_add(0x1d78));
-    let seg_sel = if avg_gain >= 10007 {
-        if avg_gain < 14085 { 1 } else { 2 }
-    } else {
+    // Lag block: write the estimator's chosen contour (`blockseg_idx`) + per-40-block lag indices
+    // (`laginds`) via the C `smpl_encode_lags`, NOT the prior single-lag contour-map flattening. The
+    // delta-lag CMF `mode` mirrors the C mean-ACB-gain thresholds (`smpl_pitch_acbgain_thr_20_Q14`).
+    let mode = if avg_gain < 10007 {
         0
+    } else if avg_gain < 14085 {
+        1
+    } else {
+        2
     };
-    let frac_seg_base = frac_base.wrapping_add((seg_sel as u32) * 0x280);
-    let mut l3 = st.prev_frac_lag;
-    let mut l2 = cur_lag2;
-    let start_seg = if read_fine { 1 } else { 0 };
-    for (frac_idx, seg) in (start_seg..cnt2).enumerate() {
-        let seg_lag = mem.i32(ctr_base.wrapping_add(0x1d38).wrapping_add((seg as u32) * 4));
-        let nl2 = ((l2 << 6) - l3) + ((seg_lag - l2) << 6);
-        let off = frac_seg_base
-            .wrapping_add((nl2 * 2) as u32)
-            .wrapping_add(0xfe);
-        let sym = pp.frac_syms.get(frac_idx).copied().unwrap_or(0);
-        enc.encode_cdf(sym, &mem.cdf_at(off, 65));
-        l3 = sym + st.prev_frac_lag + nl2;
-        l2 = seg_lag;
-        st.prev_frac_lag = l3;
-        st.prev_lag = seg_lag;
-    }
+    let tab = super::smpl_pitch_enc::load_pitch_tables();
+    super::smpl_pitch_enc::smpl_encode_lags_wire(
+        tab,
+        enc,
+        pp.blockseg_idx,
+        &pp.laginds,
+        st.prev_lagblk,
+        st.prev_lagidx,
+        mode,
+    );
+    let (nblk, nidx) =
+        super::smpl_pitch_enc::smpl_lags_predictor_after(tab, pp.blockseg_idx, &pp.laginds);
+    st.prev_lagblk = nblk;
+    st.prev_lagidx = nidx;
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::decoder::MlowDecoder;
     use super::*;
+
+    // Isolated voiced pitch-block round-trip: encode the gains + the estimator contour
+    // (`blockseg_idx`/`laginds`) then decode them back; the decoder's `block_lags` must equal the
+    // encoded `laginds`, proving the wire encode is the inverse of `decode_smpl_pitch`.
+    #[test]
+    fn pitch_block_round_trips_contour() {
+        let mem = load_smpl_mem();
+        let cases: &[(usize, [i32; 8], [i32; 4])] = &[
+            (142, [128, 129, 129, 118, 118, 121, 121, 123], [5, 2, 2, 2]),
+            (142, [128, 129, 129, 118, 118, 121, 121, 123], [5, 6, 2, 2]),
+            (59, [123, 123, 123, 123, 128, 128, 132, 132], [2, 6, 6, 6]),
+        ];
+        for &(bsx, laginds, gains) in cases {
+            let mut pp = SmplPitchParams {
+                gain_idx: gains,
+                filt_idx: [0; 4],
+                blockseg_idx: bsx,
+                laginds,
+            };
+            // subfr_counts > 0 so the filt_idx path fires (as in the real voiced encode).
+            let subfr = [1i32; 4];
+            for sf in 0..4 {
+                pp.filt_idx[sf] = 0;
+            }
+            let mut enc = RangeEncoder::new(64);
+            let mut est = SmplLsfState {
+                prev_lag: -1,
+                prev_frac_lag: -1,
+                prev_lagblk: -1,
+                prev_lagidx: -1,
+                ..Default::default()
+            };
+            encode_smpl_pitch(&mut enc, mem, &mut est, 320, 4, 0, subfr, &pp);
+            enc.done();
+            let n = enc.consumed_len();
+            let bytes = enc.bytes()[..n].to_vec();
+            let mut dec = super::super::rangecoder::RangeDecoder::new(&bytes);
+            let mut dst = SmplLsfState {
+                prev_lag: -1,
+                prev_frac_lag: -1,
+                ..Default::default()
+            };
+            let pr = super::super::smpl_pitch::decode_smpl_pitch(
+                &mut dec, mem, &mut dst, 320, 4, 0, subfr,
+            );
+            assert_eq!(
+                pr.block_lags.to_vec(),
+                laginds.to_vec(),
+                "bsx={bsx}: decoded block_lags != encoded laginds"
+            );
+        }
+    }
 
     fn corr(a: &[f32], b: &[f32]) -> f64 {
         let (mut sxy, mut sxx, mut syy) = (0f64, 0f64, 0f64);
@@ -514,6 +519,74 @@ mod tests {
             best > 0.5,
             "encode→decode round-trip correlation too low: {best}"
         );
+    }
+
+    // Dev oracle: decode hex frames (MLOW_HEX) through `decode_smpl_pitch`, dumping each voiced frame's
+    // reconstructed `block_lags` (the C `laginds` domain) to MLOW_PITCH_DUMP. Used to prove the WASM
+    // decoder reconstructs C's `laginds` from C-encoded bytes (representation equivalence check).
+    #[test]
+    fn dump_decoded_pitch_from_hex() {
+        let Ok(hexpath) = std::env::var("MLOW_HEX_PITCH") else {
+            return;
+        };
+        let out = std::env::var("MLOW_PITCH_DUMP").expect("MLOW_PITCH_DUMP path");
+        let text = std::fs::read_to_string(&hexpath).expect("read hex");
+        let mem = load_smpl_mem();
+        let tbl = load_smpl_tables();
+        let mut recs: Vec<String> = Vec::new();
+        for (pkt, line) in text.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let frame: Vec<u8> = (0..line.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&line[i..i + 2], 16).expect("hex"))
+                .collect();
+            if frame.first() != Some(&0x50) {
+                continue;
+            }
+            let config = (frame[0] >> 2) as usize & 1;
+            let mut dec = super::super::rangecoder::RangeDecoder::new(&frame[1..]);
+            let mut lstate = SmplLsfState::default();
+            for f in 0..3 {
+                let lsf = super::super::smpl_decode::decode_smpl_lsf(
+                    &mut dec,
+                    tbl,
+                    &mut lstate,
+                    config,
+                    f,
+                );
+                let pulses = super::super::smpl_pulse::decode_smpl_pulses(
+                    &mut dec,
+                    mem,
+                    320,
+                    4,
+                    1,
+                    config as i32,
+                    lsf.stage1,
+                );
+                if lsf.stage1 == 1 {
+                    let pr = super::super::smpl_pitch::decode_smpl_pitch(
+                        &mut dec,
+                        mem,
+                        &mut lstate,
+                        320,
+                        4,
+                        config as i32,
+                        pulses.subfr,
+                    );
+                    recs.push(format!(
+                        "{{\"pkt\":{pkt},\"frame\":{f},\"voiced\":1,\"block_lags\":{:?}}}",
+                        pr.block_lags.to_vec()
+                    ));
+                } else {
+                    super::super::smpl_gains::decode_smpl_gains(&mut dec, mem, 4, pulses.subfr);
+                    recs.push(format!("{{\"pkt\":{pkt},\"frame\":{f},\"voiced\":0}}"));
+                }
+            }
+        }
+        std::fs::write(&out, format!("[{}]", recs.join(","))).expect("write dump");
     }
 
     // Dev harness: encode an i16 mono 16 kHz raw file (env MLOW_MIC) into 60 ms MLow frames and write
@@ -647,7 +720,7 @@ use super::smpl_perc::{
     BitrateController, BitrateControllerInputs, PercModelState, SMPL_PERC_EMPH_UV,
     SMPL_PERC_EMPH_V, SMPL_PERC_REG, smpl_perc_ac2a, smpl_perc_model,
 };
-use super::smpl_signal_mode::{VuvMode, build_f2w, harm_strength_at, smpl_get_signal_mode};
+use super::smpl_signal_mode::{VuvMode, smpl_get_signal_mode};
 use super::smpl_synth::{
     SMPL_INTF_LEN, SMPL_ORDER, SMPL_SUBFR_COUNT, SMPL_SUBFR_LEN, SMPL_VOICED_NORM_GAIN,
     SmplFrameSynth, SmplPitchSynth, SmplSynthTables, load_smpl_synth_tables, smpl_gain_lin,
@@ -697,6 +770,11 @@ pub(crate) struct SmplEncoderState {
     /// Last `SMPL_PITCH_LAG_MAX` HP samples of the previous packet, so the first internal frame's
     /// pitch search has real history instead of zeros (the C `xhp_packet_buf` carries this).
     hp_pitch_hist: Vec<f32>,
+    /// Persistent perceptually-weighted speech buffer (the C `ltp_buf`, length `MAX_LTP_BUF_LEN`),
+    /// shifted left by one internal-frame each call. The full pitch estimator reads its tail.
+    ltp_buf: Vec<f32>,
+    /// Cross-frame pitch-estimator predictor (`PitchEstimator` non-scratch fields).
+    pitch_est: super::smpl_pitch_enc::PitchEstState,
 }
 
 /// Assumed encoder bitrate for the active MLow 1:1 config (the recorded capture's main rate is not
@@ -763,6 +841,11 @@ struct CelpFrameCtx<'a> {
     vuv: &'a mut VuvMode,
     /// Previous packet's HP tail (`SMPL_PITCH_LAG_MAX` samples) for the intf=0 pitch history.
     hp_pitch_hist: &'a [f32],
+    /// Persistent perceptually-weighted speech buffer (the C `ltp_buf`), carried across frames; the
+    /// full pitch estimator reads its tail.
+    ltp_buf: &'a mut Vec<f32>,
+    /// Cross-frame pitch-estimator predictor.
+    pitch_est: &'a mut super::smpl_pitch_enc::PitchEstState,
     /// Per-subframe perceptual autocorrelation (shared CELP + pitch input), computed once per frame.
     perc_corrs: Vec<Vec<f32>>,
     /// Decoder-reconstructed per-block pitch lags (2 per subframe) for the voiced CELP ACB. The CELP
@@ -870,9 +953,16 @@ pub(crate) fn smpl_analyze_frame_st(
     }
     es.hp_pitch_hist = hp[need - SMPL_PITCH_LAG_MAX..need].to_vec();
 
+    // Lazily size the persistent perceptually-weighted speech buffer (the C `ltp_buf`).
+    if es.ltp_buf.len() != super::smpl_pitch_enc::MAX_LTP_BUF_LEN {
+        es.ltp_buf = vec![0.0f32; super::smpl_pitch_enc::MAX_LTP_BUF_LEN];
+    }
+
     let celp = es.celp.as_mut().expect("celp built above");
     let perc = es.perc.as_mut().expect("perc built above");
     let bitrate = es.bitrate.as_mut().expect("bitrate built above");
+    let ltp_buf = &mut es.ltp_buf;
+    let pitch_est = &mut es.pitch_est;
 
     let mut prev_lsfq = es.prev_lsfq.clone();
     let mut prev_voiced = es.prev_voiced;
@@ -908,6 +998,8 @@ pub(crate) fn smpl_analyze_frame_st(
             voicing_strength: 0.0,
             vuv: &mut es.vuv,
             hp_pitch_hist: &hp_pitch_hist,
+            ltp_buf: &mut *ltp_buf,
+            pitch_est: &mut *pitch_est,
             perc_corrs: Vec::new(),
             block_lags: [[0.0; 2]; SMPL_SUBFR_COUNT],
         };
@@ -933,6 +1025,11 @@ pub(crate) fn smpl_analyze_frame_st(
         prev_lsfq = nlsf_out;
         prev_voiced = voiced_out;
         internal[f] = ip;
+        // The C resets the lag-block predictor after the last internal frame of each packet (and after
+        // any unvoiced frame, handled in smpl_analyze_internal), so cond-coding restarts per packet.
+        if f == 2 {
+            pitch_est.reset_cond();
+        }
     }
 
     // Carry SMPL_ORDER + SMPL_WINNEXT_WB_LEN history so the next packet's residual lead is filled.
@@ -1513,36 +1610,41 @@ fn smpl_rate_control_gains(target_linear: f64) -> (i32, i32, i32) {
 const SMPL_PERC_EMPH_PITCH: f32 = -0.82;
 /// `pitch_perc_resp_len` for complexity 5-8 (the 17-tap monic MA weighting).
 const SMPL_PITCH_PERC_RESP_LEN: usize = 17;
-/// Pitch search bounds in samples (`SMPL_MINPITCH_LEN`/`SMPL_MAXPITCH_LEN`).
-const SMPL_PITCH_LAG_MIN: usize = 32;
+/// Pitch search history span in samples (`SMPL_MAXPITCH_LEN`), carried for the intf=0 estimator.
 const SMPL_PITCH_LAG_MAX: usize = 320;
+/// Pitch estimator lookahead (`SMPL_PITCH_LOOKAHEAD_LEN`).
+const SMPL_PITCH_LOOKAHEAD_LEN: usize = 7;
 
-/// Build the C `w_speech` for the pitch search: the HP signal run through the per-subframe perceptual
-/// pitch weighting (a 17-tap monic MA from `smpl_perc_ac2a(perc_corrs, .., -0.82, 17)`). The returned
-/// buffer is `[SMPL_PITCH_LAG_MAX history] ++ [SMPL_INTF_LEN current frame]` so the search has a full
-/// correlation window at every candidate lag. The history is weighted with the first subframe's
-/// response (the C carries an exactly-weighted `ltp_buf`; this approximation is adequate for the
-/// open-loop lag search, which the perceptual flattening already de-biases off low-frequency energy).
-fn compute_w_speech(cs: &CelpFrameCtx, perc_corrs: &[Vec<f32>]) -> Vec<f32> {
+/// Roll the persistent perceptually-weighted speech buffer (the C `ltp_buf`) and write this internal
+/// frame's weighted speech into its tail, matching `smpl_core_encoder.c`: shift left by `framelen`,
+/// then per CELP subframe `i` apply the 17-tap monic perceptual MA (`smpl_filt_ma16_monic`) of the HP
+/// frame under `resp_pitch[i]`, plus the `PITCH_LOOKAHEAD_LEN`-sample lookahead under `resp_pitch[3]`.
+/// The HP frame (`xhp_frame`) starts `SMPL_WINNEXT_WB_LEN` samples before the internal frame; the MA
+/// reads up to `SMPL_LPC_ORDER` samples of history before that. Built in the normalized HP domain,
+/// which is scale-invariant for the estimator's pitchcorr/lag outputs.
+fn build_ltp_buf(cs: &mut CelpFrameCtx, perc_corrs: &[Vec<f32>]) {
     let resp_pitch = perc_corrs_to_wght(
         perc_corrs,
         [SMPL_PERC_EMPH_PITCH, SMPL_PERC_EMPH_PITCH],
         SMPL_PITCH_PERC_RESP_LEN,
     );
-    let hist = SMPL_PITCH_LAG_MAX;
-    let lead = SMPL_LPC_ORDER;
-    let frame_start = cs.intf * SMPL_INTF_LEN;
-    // Padded HP: `lead` MA-history + `hist` pitch-history + `SMPL_INTF_LEN` current frame.
-    let span = hist + SMPL_INTF_LEN;
-    let mut x = vec![0.0f32; lead + span];
-    // Resolve an HP sample at packet-relative index `idx` (negative reaches into the previous packet's
-    // tail held in `hp_pitch_hist`, where entry `k` is relative index `k - hist`).
-    let sample = |idx: isize| -> f32 {
+    let max_len = super::smpl_pitch_enc::MAX_LTP_BUF_LEN; // 659
+    let look = SMPL_PITCH_LOOKAHEAD_LEN; // 7
+    let framelen = SMPL_INTF_LEN; // 320
+    // Shift existing weighted speech left by one internal frame (C memmove).
+    let keep = max_len - framelen - look;
+    cs.ltp_buf.copy_within(framelen..framelen + keep, 0);
+    // HP sample at internal-frame-relative index `idx` (xhp_frame origin), reaching into the previous
+    // packet's tail (`hp_pitch_hist`, entry `k` at relative index `k - SMPL_PITCH_LAG_MAX`) for idx<0.
+    let frame_start = cs.intf as isize * SMPL_INTF_LEN as isize - SMPL_WINNEXT_WB_LEN as isize;
+    let hist = SMPL_PITCH_LAG_MAX as isize;
+    let sample = |rel: isize| -> f32 {
+        let idx = frame_start + rel;
         if idx >= 0 {
             let u = idx as usize;
             if u < cs.hp_n.len() { cs.hp_n[u] } else { 0.0 }
-        } else if cs.hp_pitch_hist.len() == hist {
-            let k = idx + hist as isize;
+        } else if cs.hp_pitch_hist.len() == hist as usize {
+            let k = idx + hist;
             if k >= 0 {
                 cs.hp_pitch_hist[k as usize]
             } else {
@@ -1552,97 +1654,45 @@ fn compute_w_speech(cs: &CelpFrameCtx, perc_corrs: &[Vec<f32>]) -> Vec<f32> {
             0.0
         }
     };
-    for j in 0..span {
-        x[lead + j] = sample(frame_start as isize + j as isize - hist as isize);
+    // w_speech write origin in ltp_buf (C: MAX_LTP_BUF_LEN - numsubfrs*subfrlen - lookahead).
+    let w_origin = max_len - SMPL_SUBFR_COUNT * SMPL_SUBFR_LEN - look; // 332
+    for i in 0..SMPL_SUBFR_COUNT {
+        let coef = &resp_pitch[i];
+        for n in 0..SMPL_SUBFR_LEN {
+            let pos = (i * SMPL_SUBFR_LEN + n) as isize;
+            let mut res = sample(pos); // monic coef[0]==1
+            for (j, &c) in coef
+                .iter()
+                .enumerate()
+                .take(SMPL_PITCH_PERC_RESP_LEN)
+                .skip(1)
+            {
+                res += c * sample(pos - j as isize);
+            }
+            cs.ltp_buf[w_origin + i * SMPL_SUBFR_LEN + n] = res;
+        }
     }
-    for i in 0..lead {
-        x[i] = sample(frame_start as isize - hist as isize + i as isize - lead as isize);
-    }
-    let mut w = vec![0.0f32; span];
-    for j in 0..span {
-        let coef = if j >= hist {
-            &resp_pitch[((j - hist) / SMPL_SUBFR_LEN).min(SMPL_SUBFR_COUNT - 1)]
-        } else {
-            &resp_pitch[0]
-        };
-        let n = lead + j;
-        let mut res = x[n]; // monic: coef[0]==1
-        for (i, &c) in coef
+    // Lookahead tail under the last subframe's response.
+    let coef = &resp_pitch[SMPL_SUBFR_COUNT - 1];
+    for n in 0..look {
+        let pos = (framelen + n) as isize;
+        let mut res = sample(pos);
+        for (j, &c) in coef
             .iter()
             .enumerate()
             .take(SMPL_PITCH_PERC_RESP_LEN)
             .skip(1)
         {
-            res += c * x[n - i];
+            res += c * sample(pos - j as isize);
         }
-        w[j] = res;
+        cs.ltp_buf[max_len - look + n] = res;
     }
-    w
 }
 
-/// Normalized-autocorrelation pitch search on `w_speech`. `w` holds `SMPL_PITCH_LAG_MAX` history
-/// samples followed by the `SMPL_INTF_LEN` current frame; the correlation uses a FIXED window (the
-/// current frame) for every candidate lag, so the energy normalization is lag-independent and the
-/// search can't latch the trivial near-`n` lag (where a shrinking overlap window inflates the
-/// correlation to 1.0). A previous-lag continuity bias suppresses octave/double-lag traps the bare
-/// argmax falls into (the C uses block tracks + prev-lag bias to the same end). Returns
-/// `(pitchcorr, lag_samples)` with `lag_samples == 0` when no lag clears the voicing floor.
-fn pitch_search_wspeech(w: &[f32], prev_lag: f32) -> (f32, f32) {
-    let hist = SMPL_PITCH_LAG_MAX;
-    debug_assert!(w.len() >= hist + SMPL_INTF_LEN);
-    let win = &w[hist..hist + SMPL_INTF_LEN]; // current frame, fixed window
-    let e0: f32 = win.iter().map(|&v| v * v).sum();
-    if e0 < 1e-9 {
-        return (0.0, 0.0);
-    }
-    // Normalized correlation per lag (lag-independent denominator window).
-    let mut corr = vec![0.0f32; SMPL_PITCH_LAG_MAX + 1];
-    let (mut best_lag, mut best_score) = (0usize, f32::MIN);
-    for l in SMPL_PITCH_LAG_MIN..=SMPL_PITCH_LAG_MAX {
-        let (mut num, mut el) = (0.0f32, 0.0f32);
-        for i in 0..SMPL_INTF_LEN {
-            let lagged = w[hist + i - l];
-            num += win[i] * lagged;
-            el += lagged * lagged;
-        }
-        if el < 1e-9 {
-            continue;
-        }
-        let c = num / (e0 * el).sqrt();
-        corr[l] = c;
-        // Continuity bias toward lags near prev_lag, so a strong harmonic at a multiple of the true
-        // pitch doesn't steal the frame.
-        let mut score = c;
-        if prev_lag > 0.0 {
-            score -= 0.35 * (l as f32 / prev_lag).log2().abs();
-        }
-        if score > best_score {
-            best_score = score;
-            best_lag = l;
-        }
-    }
-    if best_lag == 0 {
-        return (0.0, 0.0);
-    }
-    // Sub-multiple (octave) correction: if a divisor of the chosen lag (the true shorter pitch period)
-    // still correlates strongly, prefer it — the bare argmax otherwise locks onto a pitch multiple,
-    // halving the perceived periodicity. Mirrors the C `shortlagbias` toward shorter lags.
-    let mut chosen = best_lag;
-    for div in 2..=4 {
-        let cand = best_lag / div;
-        if cand < SMPL_PITCH_LAG_MIN {
-            break;
-        }
-        if corr[cand] > 0.80 * corr[best_lag] {
-            chosen = cand;
-        }
-    }
-    (corr[chosen].max(0.0), chosen as f32)
-}
-
-/// Analyze one internal frame: compute the shared perceptual autocorrelation, derive `w_speech`, run
-/// the pitch search + the `smpl_get_signal_mode` voicing classifier, then build the voiced (LTP) or
-/// unvoiced candidate, commit it to the shadow synth `st`, and advance the entropy predictor mirror.
+/// Analyze one internal frame: compute the shared perceptual autocorrelation, build the perceptually-
+/// weighted `ltp_buf`, run the faithful multi-stage pitch estimator + the `smpl_get_signal_mode`
+/// voicing classifier, then build the voiced (LTP) or unvoiced candidate, commit it to the shadow synth
+/// `st`, and advance the entropy predictor mirror.
 #[allow(clippy::too_many_arguments)]
 fn smpl_analyze_internal(
     synth_t: &SmplSynthTables,
@@ -1661,27 +1711,30 @@ fn smpl_analyze_internal(
     // weighting and the CELP weighting derive from it (matching the C `perc_corrs_buf`).
     cs.perc_corrs = compute_perc_corrs(cs).to_vec();
 
-    // Pitch on perceptually-weighted speech, then the real voicing classifier.
-    let w_speech = compute_w_speech(cs, &cs.perc_corrs);
-    let prev_lag = lstate.prev_lag_samples;
-    let (pitchcorr, lag_samples) = pitch_search_wspeech(&w_speech, prev_lag);
-    let mut lags8 = [lag_samples; 8];
-    let avg_lag = lag_samples;
-    let f2w = build_f2w(&cs.f2);
-    // The C computes harmonicity only when the pitch search ran (active voice + a real lag); a 0/short
-    // lag would yield an out-of-range harmonic bin. Mirror that: harm stays 0 otherwise.
-    let harm = if cs.coded_as_active_voice && avg_lag >= SMPL_PITCH_LAG_MIN as f32 {
-        harm_strength_at(avg_lag, &f2w)
-    } else {
-        0.0
-    };
+    // Roll the persistent perceptually-weighted speech buffer (the C `ltp_buf`) and write this frame's
+    // weighted speech + lookahead into its tail, then run the faithful multi-stage pitch estimator.
+    build_ltp_buf(cs, &cs.perc_corrs.clone());
     let f2 = cs.f2;
+    let ltp_buf = cs.ltp_buf.clone();
+    let pr =
+        super::smpl_pitch_enc::smpl_pitch(cs.pitch_est, &ltp_buf, &f2, cs.coded_as_active_voice);
+    let pitchcorr = pr.pitchcorr;
+    let avg_lag = pr.avg_lag;
+    let harm = pr.harm_strength;
+    let mut lags8 = pr.lags;
+    // The single representative lag the voiced encode path uses; the C's wire contour is anchored on
+    // the first-subframe lag, so use that as the encode target (the per-block CELP basis is rebuilt
+    // from the wire pitch params downstream).
+    let lag_samples = pr.lags[0];
     let sp = cs.sp_act_prob;
     let vstr = smpl_get_signal_mode(pitchcorr, &lags8, avg_lag, harm, &f2, sp, cs.vuv);
     cs.voicing_strength = vstr;
     let is_voiced_decision = vstr > 0.0 && cs.coded_as_active_voice;
     lstate.prev_lag_samples = if is_voiced_decision { lag_samples } else { 0.0 };
+    // The C resets the lag-block predictor after an unvoiced frame (and after each packet's last frame,
+    // handled at the call site); mirror the unvoiced reset here so cond-coding restarts correctly.
     if !is_voiced_decision {
+        cs.pitch_est.reset_cond();
         lags8 = [0.0; 8];
     }
 
@@ -1690,7 +1743,7 @@ fn smpl_analyze_internal(
     let mut voiced_lstate = lstate.clone();
     smpl_advance_lsf_state(&mut voiced_lstate, intf, 1);
     let voiced = if is_voiced_decision {
-        smpl_voiced_decision_for_lag(&voiced_lstate, lag_samples, cs, &mut lags8)
+        smpl_voiced_decision_for_lag(pr.blockseg_idx, &pr.laginds, cs, &mut lags8)
     } else {
         None
     };
@@ -1717,245 +1770,27 @@ fn smpl_analyze_internal(
     (chosen.ip, committed_nlsf, is_voiced)
 }
 
-#[inline]
-fn clamp_sym(v: i32) -> i32 {
-    v.clamp(0, 63)
-}
-
-/// Pitch geometry read from the WASM tables (the same addresses decode_smpl_pitch reads).
-struct PitchLagConfig {
-    pcfg: u32,
-    num_contours: i32,
-    contour_map: u32,
-}
-
-fn load_pitch_lag_config(mem: &SmplMem) -> PitchLagConfig {
-    let pcfg = mem.g_clk.wrapping_add(0x5704);
-    PitchLagConfig {
-        pcfg,
-        num_contours: mem.u32(pcfg.wrapping_add(22240)) as i32,
-        contour_map: mem.u32(pcfg.wrapping_add(22244)),
-    }
-}
-
-impl PitchLagConfig {
-    /// The contour index the decoder's contour-map search resolves for absolute-lag symbol `s`.
-    fn contour_for_lag_sym(&self, mem: &SmplMem, s: i32) -> i32 {
-        let target = s + 1;
-        for i in 0..217 {
-            if mem.u8(self.contour_map.wrapping_add(i as u32)) as i32 == target {
-                return if i < self.num_contours { i } else { -1 };
-            }
-        }
-        -1
-    }
-    fn seg_lag(&self, mem: &SmplMem, contour: i32, seg: i32) -> i32 {
-        let ctr_base = self.pcfg.wrapping_add((contour as u32).wrapping_mul(0x44));
-        mem.i32(ctr_base.wrapping_add(0x1d38).wrapping_add((seg as u32) * 4))
-    }
-    fn seg_count(&self, mem: &SmplMem, contour: i32) -> i32 {
-        let ctr_base = self.pcfg.wrapping_add((contour as u32).wrapping_mul(0x44));
-        mem.i32(ctr_base.wrapping_add(0x1d78))
-    }
-    fn seg_len(&self, mem: &SmplMem, contour: i32, seg: i32) -> i32 {
-        let ctr_base = self.pcfg.wrapping_add((contour as u32).wrapping_mul(0x44));
-        mem.i32(ctr_base.wrapping_add(0x1d58).wrapping_add((seg as u32) * 4))
-    }
-}
-
-/// Reconstruct the decoder's per-block pitch lags (the 8 `block_lags`, in samples) from the encoded
-/// pitch params `pp` and the predictor `prev_lag`/`prev_frac_lag`, mirroring `decode_smpl_pitch`'s
-/// fill. The CELP ACB basis must use exactly these lags so the encoder/decoder LTP contributions
-/// agree (the single-lag inverse can clamp the fine symbol, so the reconstructed lag differs from the
-/// requested target). Returns the 8 per-block lags in samples (`block_lags_q6 * 0.5 + 32`, ≤ 320).
-fn reconstruct_block_lags(
-    mem: &SmplMem,
-    pp: &SmplPitchParams,
-    prev_lag: i32,
-    prev_frac_lag: i32,
-) -> [f32; 8] {
-    let cfg = load_pitch_lag_config(mem);
-    let mut blk_q6 = [0i32; 8];
-    if pp.contour < 0 || pp.contour >= cfg.num_contours {
-        return [0.0; 8];
-    }
-    let base_lag = cfg.seg_lag(mem, pp.contour, 0);
-    let cnt2 = cfg.seg_count(mem, pp.contour);
-    let mut subfr_w = 0usize;
-    let mut cur_lag2 = base_lag;
-    let mut prev_frac = prev_frac_lag;
-    let mut start_seg = 0;
-    if pp.fine_read {
-        cur_lag2 = (base_lag << 6) + pp.fine_sym;
-        prev_frac = cur_lag2;
-        let seg_len0 = cfg.seg_len(mem, pp.contour, 0);
-        for _ in 0..seg_len0 {
-            if subfr_w < 8 {
-                blk_q6[subfr_w] = cur_lag2;
-            }
-            subfr_w += 1;
-        }
-        if subfr_w < 8 {
-            blk_q6[subfr_w] = cur_lag2;
-        }
-        start_seg = 1;
-    }
-    let mut l3 = if pp.fine_read {
-        prev_frac
-    } else {
-        prev_frac_lag
-    };
-    let mut l2 = cur_lag2;
-    for (frac_idx, seg) in (start_seg..cnt2).enumerate() {
-        let seg_lag = cfg.seg_lag(mem, pp.contour, seg);
-        let nl2 = ((l2 << 6) - l3) + ((seg_lag - l2) << 6);
-        let sym = pp.frac_syms.get(frac_idx).copied().unwrap_or(0);
-        l3 = sym + prev_frac + nl2;
-        let seg_len = cfg.seg_len(mem, pp.contour, seg);
-        for _ in 0..seg_len {
-            if subfr_w < 8 {
-                blk_q6[subfr_w] = l3;
-            }
-            subfr_w += 1;
-        }
-        l2 = seg_lag;
-        prev_frac = l3;
-    }
-    let _ = prev_lag;
-    let mut out = [0.0f32; 8];
-    for b in 0..8 {
-        out[b] = (blk_q6[b] as f32 * 0.5 + 32.0).min(320.0);
-    }
-    out
-}
-
-/// The (sym, reconstructed code) a segment produces for `target_ilq6` at this contour's seg lag.
-fn recon_seg_code(seg_lag: i32, target_ilq6: i32) -> (i32, i32) {
-    let sym = clamp_sym(target_ilq6 - seg_lag * 64);
-    (sym, sym + seg_lag * 64)
-}
-
-/// Build the pitch params reconstructing (per subframe) to the lag code `target_ilq6 = 2*(lag-32)`,
-/// on the absolute path when prev_lag<0 else the delta path. Returns None if no contour/delta fits.
-/// Algebraic inverse of decode_smpl_pitch's lag recurrence (NOT a byte-exact WASM port).
-fn smpl_pitch_params_for_lag(
-    mem: &SmplMem,
-    target_ilq6: i32,
-    prev_lag: i32,
-    gain_idx: [i32; 4],
-    filt_idx: [i32; 4],
-) -> Option<SmplPitchParams> {
-    let cfg = load_pitch_lag_config(mem);
-    let (mut best_key, mut best_contour, mut best_err) = (-1i32, -1i32, 1i32 << 30);
-    for s in 0..cfg.num_contours {
-        let contour = cfg.contour_for_lag_sym(mem, s);
-        if contour < 0 {
-            continue;
-        }
-        let cnt2 = cfg.seg_count(mem, contour);
-        if cnt2 < 1 {
-            continue;
-        }
-        let mut err = 0;
-        for seg in 0..cnt2 {
-            let (_, code) = recon_seg_code(cfg.seg_lag(mem, contour, seg), target_ilq6);
-            err += (code - target_ilq6).abs();
-        }
-        if best_key < 0 || err < best_err {
-            best_key = s;
-            best_contour = contour;
-            best_err = err;
-        }
-    }
-    if best_key < 0 {
-        return None;
-    }
-    let mut pp = SmplPitchParams {
-        gain_idx,
-        filt_idx,
-        lag_abs_sym: -1,
-        lag_delta_sym: -1,
-        lag_ref_sym: -1,
-        lag: best_key,
-        contour: best_contour,
-        fine_read: false,
-        fine_sym: 0,
-        frac_syms: Vec::new(),
-    };
-    if prev_lag < 0 {
-        pp.lag_abs_sym = best_key;
-    } else {
-        let mut found = false;
-        for di in 0..9 {
-            let lo = mem.u8(0xe7ef0u32.wrapping_add((di as u32) * 2)) as i32;
-            let hi = mem.u8(0xe7ef0u32.wrapping_add((di as u32) * 2 + 1)) as i32;
-            if best_key >= lo && best_key <= hi {
-                pp.lag_delta_sym = di;
-                pp.lag_ref_sym = best_key - lo;
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            return None;
-        }
-    }
-    let base_lag = cfg.seg_lag(mem, best_contour, 0);
-    let mut read_fine = true;
-    if prev_lag >= 0 {
-        let d = base_lag - prev_lag;
-        if (-1..3).contains(&d) {
-            read_fine = false;
-        }
-    }
-    pp.fine_read = read_fine;
-    let cnt2 = cfg.seg_count(mem, best_contour);
-    let start_seg = if read_fine {
-        pp.fine_sym = clamp_sym(target_ilq6 - base_lag * 64);
-        1
-    } else {
-        0
-    };
-    for seg in start_seg..cnt2 {
-        let (sym, _) = recon_seg_code(cfg.seg_lag(mem, best_contour, seg), target_ilq6);
-        pp.frac_syms.push(sym);
-    }
-    Some(pp)
-}
-
-/// Advance the predictor state exactly as (en/de)coding `pp` would, without entropy coding — so the
-/// analysis predicts prev_lag/prev_gain_idx for the next internal frame. Mirrors Go `smplReplayPitchState`.
+/// Advance the predictor mirror exactly as `encode_smpl_pitch` does, without entropy coding — so the
+/// analysis predicts the lag/gain predictor for the next internal frame. Threads the C `ParamsEncoder`
+/// lag predictor (`prev_lagblk`/`prev_lagidx`) from the chosen contour + per-block laginds.
 fn smpl_replay_pitch_state(
-    mem: &SmplMem,
+    _mem: &SmplMem,
     st: &mut SmplLsfState,
     p3: i32,
     subfr_counts: [i32; 4],
     pp: &SmplPitchParams,
 ) {
-    let cfg = load_pitch_lag_config(mem);
     for sf in 0..(p3 as usize).min(4) {
         st.prev_gain_idx = pp.gain_idx[sf];
         if subfr_counts[sf] > 0 {
             st.prev_filt_idx = pp.filt_idx[sf];
         }
     }
-    if pp.contour < 0 || pp.contour >= cfg.num_contours {
-        return;
-    }
-    let base_lag = cfg.seg_lag(mem, pp.contour, 0);
-    let cnt2 = cfg.seg_count(mem, pp.contour);
-    let mut start_seg = 0;
-    if pp.fine_read {
-        st.prev_frac_lag = base_lag * 64 + pp.fine_sym;
-        st.prev_lag = base_lag;
-        start_seg = 1;
-    }
-    for (frac_idx, seg) in (start_seg..cnt2).enumerate() {
-        let seg_lag = cfg.seg_lag(mem, pp.contour, seg);
-        let sym = pp.frac_syms.get(frac_idx).copied().unwrap_or(0);
-        st.prev_frac_lag = sym + seg_lag * 64;
-        st.prev_lag = seg_lag;
-    }
+    let tab = super::smpl_pitch_enc::load_pitch_tables();
+    let (nblk, nidx) =
+        super::smpl_pitch_enc::smpl_lags_predictor_after(tab, pp.blockseg_idx, &pp.laginds);
+    st.prev_lagblk = nblk;
+    st.prev_lagidx = nidx;
 }
 
 /// The committed voiced decision for one internal frame: the encodable pitch params and the
@@ -1965,32 +1800,34 @@ struct VoicedDecision {
     pitch: SmplPitchSynth,
 }
 
-/// Encode the chosen pitch lag into wire params (`smpl_pitch_params_for_lag`), reconstruct the
-/// decoder's per-block lags into `cs.block_lags` (so the CELP ACB basis matches the decoder), and
-/// return the voiced decision. Returns None if the lag is not encodable against the predictor state.
+/// Carry the estimator's full per-block contour (`blockseg_idx` + `laginds`) into the voiced decision:
+/// the wire pitch encode writes them straight through `smpl_encode_lags`, and the CELP ACB basis uses
+/// the SAME per-block lags (`lag = laginds*0.5 + 32`) so the encoder/decoder LTP contributions agree.
 /// The gain/filter indices here are placeholders; the voiced candidate overwrites them with the real
 /// CELP `acb_idx`/`fcb_idx` per subframe.
 fn smpl_voiced_decision_for_lag(
-    lstate: &SmplLsfState,
-    lag_samples: f32,
+    blockseg_idx: usize,
+    laginds: &[i32; 8],
     cs: &mut CelpFrameCtx,
     lags8: &mut [f32; 8],
 ) -> Option<VoicedDecision> {
-    let mem = load_smpl_mem();
-    let target_ilq6 = ((lag_samples - 32.0) * 2.0).round() as i32;
-    let gain_idx = [5i32; 4];
-    let filt_idx = [0i32; 4];
-    let pp = smpl_pitch_params_for_lag(mem, target_ilq6, lstate.prev_lag, gain_idx, filt_idx)?;
-
-    // Reconstruct the decoder's EXACT per-block lags from the encoded params (the fine-symbol clamp can
-    // make these differ from the requested target). The CELP ACB basis must use these so the encoder's
-    // and decoder's LTP contributions agree; a mismatch drives the optimal ACB gain toward zero.
-    let block_lags8 = reconstruct_block_lags(mem, &pp, lstate.prev_lag, lstate.prev_frac_lag);
+    // The decoder maps each 40-block lag index `lag = laginds*0.5 + SMPL_MIN_PITCH_LAG`, clamped ≤320.
+    let mut block_lags8 = [0.0f32; 8];
+    for b in 0..8 {
+        block_lags8[b] = (laginds[b] as f32 * 0.5 + 32.0).min(320.0);
+    }
     *lags8 = block_lags8;
     for sf in 0..SMPL_SUBFR_COUNT {
         cs.block_lags[sf] = [block_lags8[2 * sf], block_lags8[2 * sf + 1]];
     }
     let mean_lag = block_lags8.iter().sum::<f32>() / 8.0;
+
+    let pp = SmplPitchParams {
+        gain_idx: [5i32; 4],
+        filt_idx: [0i32; 4],
+        blockseg_idx,
+        laginds: *laginds,
+    };
 
     let pitch = SmplPitchSynth {
         voiced: true,
@@ -2089,6 +1926,1215 @@ fn smpl_voiced_candidate(
         gain_q,
         pitch: vd.pitch.clone(),
         silent: false,
+    }
+}
+```
+
+### `smpl_pitch_enc.rs`
+
+```rust
+//! Faithful port of the SILK-style multi-stage pitch estimator (`smpl_pitch` in `smpl_pitch_util.c`,
+//! tables/state in `smpl_pitch.c`). Replaces the prior single-resolution autocorrelation search: it
+//! HP-filters and 2x-downsamples the perceptually-weighted `ltp_buf`, runs an open-loop block-track
+//! survivor search at the coarse (16 kHz upsampled from 8 kHz) resolution, refines per-block at full
+//! resolution around the survivors, and folds in the same rate/prev-lag/spectral-harmonicity biases the
+//! C uses. The outputs (`pitchcorr`, per-subframe `lags[8]`, `avg_lag`, `harm_strength`) feed the
+//! bit-exact `smpl_get_signal_mode` classifier, so faithful pitchcorr raises the voiced count to match C.
+//!
+//! The constant tables (blocksegs/blocktracks/CMFs, decoded from the packed C bitstream via `ec_dec` +
+//! `dcmf_to_cmf` at load time) are loaded from a committed JSON fixture rather than re-porting the
+//! decoders, since they are immutable. Only the 20 ms / 8-subframe config is supported (the active MLow
+//! 1:1 path); 10 ms frames never occur here.
+#![allow(clippy::needless_range_loop)]
+
+use super::smpl_signal_mode::{build_f2w, harm_strength_at};
+use std::sync::OnceLock;
+
+// ---- constants (smpl_defines.h) ----
+const FS_KHZ: i32 = 16;
+const STAGE1_FS_KHZ: i32 = 8;
+const COARSE_FS_KHZ: i32 = 16;
+const TOT_INTERP_DELAY: i32 = 6;
+pub(crate) const NUM_SUBFRAMES: usize = 8;
+const MINPITCH_MS: i32 = 2;
+const MAXPITCH_MS: i32 = 20;
+const MINPITCH_LEN: i32 = MINPITCH_MS * FS_KHZ; // 32
+const MAXPITCH_LEN: i32 = MAXPITCH_MS * FS_KHZ; // 320
+const MINPITCH_STAGE1: i32 = MINPITCH_MS * STAGE1_FS_KHZ - TOT_INTERP_DELAY; // 10
+const MAXPITCH_STAGE1: i32 = MAXPITCH_MS * STAGE1_FS_KHZ + TOT_INTERP_DELAY; // 166
+const PITCH_DELTAWGHT: f32 = 0.1439;
+const PITCH_SHORTWGHT1: f32 = 0.04;
+const SPEC_HARM_BIAS: f32 = 2.5;
+const PREVWGHT: f32 = 0.7981;
+const PREVWGHT_SPAN: f32 = 0.15;
+const RATEWGHT_HR: f32 = 0.022;
+const LAG_SUBFRLEN: i32 = 40;
+const LAG_SUBFRLEN_STAGE1: i32 = STAGE1_FS_KHZ * LAG_SUBFRLEN / FS_KHZ; // 20
+const PITCHBLOCK_MS: i32 = 2;
+const PITCH_LOOKAHEAD_LEN: usize = 7;
+pub(crate) const MAX_LTP_BUF_LEN: usize = 659;
+const F_LEN: usize = 257;
+
+const PITCH_DOWNSAMP_DELAY: usize = 7;
+const PITCH_INTERPOL_DELAY_C: usize = 4;
+
+const PITCH_NUM_BLOCKS: usize = ((MAXPITCH_MS - MINPITCH_MS) / PITCHBLOCK_MS) as usize; // 9
+const PITCHBLOCK: usize = (PITCHBLOCK_MS * FS_KHZ) as usize; // 32
+const NUM_LAGS_STAGE1: usize = (MAXPITCH_STAGE1 - MINPITCH_STAGE1 + 1) as usize; // 157
+const NUMLAGS_COARSE: usize = (COARSE_FS_KHZ * (MAXPITCH_MS - MINPITCH_MS)) as usize; // 288
+const NUMLAGS_FS: usize = (FS_KHZ * (MAXPITCH_MS - MINPITCH_MS)) as usize; // 288
+
+/// `numstates1` block-track survivors at complexity 5-8 (`update_complexity_setting`: `pitch_numstates1
+/// = 24`). The `smpl_pitch.c` init default of 8 is overridden per-stream by `smpl_update_pitch_params`.
+const NUMSTATES1: usize = 24;
+/// complexity-8 is NOT low-complexity (numstates1 > 4), so `low_complexity_mode == false`.
+const LOW_COMPLEXITY: bool = false;
+/// 20 kbps is the HIGH-rate path (`low_rate == false`).
+const LOW_RATE: bool = false;
+
+// ---- decoded constant tables (loaded once from the committed blob) ----
+#[derive(serde::Serialize, serde::Deserialize)]
+struct BlockSeg {
+    nblocks: usize,
+    blocks: Vec<usize>,
+    seglens: Vec<usize>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+struct BlockTrack {
+    track: [usize; NUM_SUBFRAMES],
+    meanblock: f32,
+    trackdeltas: f32,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct PitchTables {
+    blocksegs: Vec<BlockSeg>,
+    blocktracks: Vec<BlockTrack>,
+    blocksegs2idx: Vec<usize>,
+    blockseg_idx_cmf: Vec<u32>,
+    delta_lag_cmfs: Vec<Vec<u32>>,
+    blocksegs_ix: Vec<[usize; 2]>,
+    firstblock_range: Vec<[usize; 2]>,
+    block_transition_cmf: Vec<Vec<u32>>,
+}
+
+static TABLES: OnceLock<PitchTables> = OnceLock::new();
+
+pub(crate) fn load_pitch_tables() -> &'static PitchTables {
+    TABLES.get_or_init(|| {
+        super::smpl_tables_blob::load_blob(include_bytes!("testdata/smpl_pitch_tables.bin"))
+    })
+}
+
+/// Parse the pitch-tables JSON dump into the runtime `PitchTables` (the table generator calls this,
+/// so the `Value`-extraction runs once at gen time rather than every load).
+#[cfg(test)]
+pub(crate) fn parse_pitch_tables_json(s: &str) -> PitchTables {
+    let v: serde_json::Value = serde_json::from_str(s).expect("pitch tables json");
+    let as_usize = |x: &serde_json::Value| x.as_i64().unwrap() as usize;
+    let as_u32 = |x: &serde_json::Value| x.as_i64().unwrap() as u32;
+    let blocksegs = v["blocksegs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| BlockSeg {
+            nblocks: as_usize(&s["nblocks"]),
+            blocks: s["blocks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(as_usize)
+                .collect(),
+            seglens: s["seglens"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(as_usize)
+                .collect(),
+        })
+        .collect();
+    let blocktracks = v["blocktracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| {
+            let mut track = [0usize; NUM_SUBFRAMES];
+            for (i, e) in t["track"].as_array().unwrap().iter().enumerate() {
+                track[i] = as_usize(e);
+            }
+            BlockTrack {
+                track,
+                meanblock: t["meanblock"].as_f64().unwrap() as f32,
+                trackdeltas: t["trackdeltas"].as_f64().unwrap() as f32,
+            }
+        })
+        .collect();
+    let blocksegs2idx = v["blocksegs2idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(as_usize)
+        .collect();
+    let blockseg_idx_cmf = v["blockseg_idx_CMF"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(as_u32)
+        .collect();
+    let delta_lag_cmfs = v["delta_lag_CMFs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row.as_array().unwrap().iter().map(as_u32).collect())
+        .collect();
+    let blocksegs_ix = v["blocksegs_ix"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            let a = p.as_array().unwrap();
+            [as_usize(&a[0]), as_usize(&a[1])]
+        })
+        .collect();
+    let firstblock_range = v["firstblock_range"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            let a = p.as_array().unwrap();
+            [as_usize(&a[0]), as_usize(&a[1])]
+        })
+        .collect();
+    let block_transition_cmf = v["block_transition_CMF"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row.as_array().unwrap().iter().map(as_u32).collect())
+        .collect();
+    PitchTables {
+        blocksegs,
+        blocktracks,
+        blocksegs2idx,
+        blockseg_idx_cmf,
+        delta_lag_cmfs,
+        blocksegs_ix,
+        firstblock_range,
+        block_transition_cmf,
+    }
+}
+
+/// Per-stream estimator state (the C `PitchEstimator` non-scratch fields). `prev_lagblk/prev_lagidx`
+/// are reset to -1 at frame boundaries by the encoder (`smpl_pitch_reset_cond`).
+#[derive(Clone)]
+pub(crate) struct PitchEstState {
+    pub prev_lag: f32,
+    pub prev_pitch_corr: f32,
+    pub prev_lagblk: i32,
+    pub prev_lagidx: i32,
+}
+
+impl Default for PitchEstState {
+    fn default() -> Self {
+        PitchEstState {
+            prev_lag: 0.0,
+            prev_pitch_corr: 0.0,
+            prev_lagblk: -1,
+            prev_lagidx: -1,
+        }
+    }
+}
+
+impl PitchEstState {
+    /// `smpl_pitch_reset_cond`: clear the cross-frame lag-block predictor (called after the last frame
+    /// of a packet and after any unvoiced frame, so cond-coding restarts).
+    pub fn reset_cond(&mut self) {
+        self.prev_lagblk = -1;
+        self.prev_lagidx = -1;
+    }
+}
+
+/// Pitch estimator result for one internal frame. `laginds`/`blockseg_idx` are the estimator's chosen
+/// per-block lag indices and contour; the classifier consumes `pitchcorr`/`lags`/`avg_lag`/`harm`,
+/// while the wire pitch encoder (downstream) can use the contour to carry the per-block lags.
+pub(crate) struct PitchResult {
+    pub pitchcorr: f32,
+    pub lags: [f32; NUM_SUBFRAMES],
+    #[allow(dead_code)]
+    pub laginds: [i32; NUM_SUBFRAMES],
+    pub avg_lag: f32,
+    pub harm_strength: f32,
+    #[allow(dead_code)]
+    pub blockseg_idx: usize,
+}
+
+// ---- filters / DSP helpers (faithful to the C) ----
+
+/// `smpl_filt_arma1` with `pitch_hp_b={1,-1}`, `pitch_hp_a={1,-0.96}`, zero state at call start.
+/// MA1 (`ma[n] = x[n] - x[n-1]`, `ma[0] = x[0]`) then AR1 in the C's 5-sample unrolled form using
+/// precomputed powers of `ar1 = 0.96`, so the float accumulation order matches `smpl_filt_ar1`.
+fn pitch_hp_filter(x: &[f32], out: &mut [f32]) {
+    let n = x.len();
+    // MA1 into `out` (state_ma = x[-1] = 0).
+    let mut state_ma = 0.0f32;
+    for i in 0..n {
+        out[i] = x[i] - state_ma;
+        state_ma = x[i];
+    }
+    // AR1 (`smpl_filt_ar1`): y[n] = ma[n] + 0.96*y[n-1], unrolled by 5 like the C.
+    let ar1 = 0.96f32;
+    let ar1_2 = ar1 * ar1;
+    let ar1_3 = ar1 * ar1_2;
+    let ar1_4 = ar1 * ar1_3;
+    let ar1_5 = ar1 * ar1_4;
+    let mut ytmp = 0.0f32; // y[-1]
+    let mut idx = 0usize;
+    while idx + 4 < n {
+        let x0 = out[idx];
+        let x1 = out[idx + 1];
+        let x2 = out[idx + 2];
+        let x3 = out[idx + 3];
+        let x4 = out[idx + 4];
+        out[idx + 4] = x4 + ar1 * x3 + ar1_2 * x2 + ar1_3 * x1 + ar1_4 * x0 + ar1_5 * ytmp;
+        out[idx] = x0 + ar1 * ytmp;
+        out[idx + 1] = x1 + ar1 * x0 + ar1_2 * ytmp;
+        out[idx + 2] = x2 + ar1 * x1 + ar1_2 * x0 + ar1_3 * ytmp;
+        out[idx + 3] = x3 + ar1 * x2 + ar1_2 * x1 + ar1_3 * x0 + ar1_4 * ytmp;
+        ytmp = out[idx + 4];
+        idx += 5;
+    }
+    while idx < n {
+        ytmp = out[idx] + ytmp * ar1;
+        out[idx] = ytmp;
+        idx += 1;
+    }
+}
+
+const DOWNSAMP_FILT: [f32; 2 * PITCH_DOWNSAMP_DELAY + 1] = [
+    -0.045472838,
+    0.0,
+    0.06366198,
+    0.0,
+    -0.10610329,
+    0.0,
+    0.31830987,
+    0.5,
+    0.31830987,
+    0.0,
+    -0.10610329,
+    0.0,
+    0.06366198,
+    0.0,
+    -0.045472838,
+];
+
+/// `smpl_pitch_downsample`: 2x decimating FIR. `ptr_in` has `PITCH_DOWNSAMP_DELAY` lead samples
+/// (offset) already written into `ptr_out[0..offset]`; output length is `(L - 2*delay)/2`.
+fn pitch_downsample(ptr_in: &[f32], l: usize, ptr_out: &mut [f32]) -> usize {
+    let d = PITCH_DOWNSAMP_DELAY;
+    let n = (l - 2 * d) / 2;
+    for j in 0..n {
+        let mut tmp = ptr_in[2 * j + d] * DOWNSAMP_FILT[d];
+        let mut i = 0;
+        while i < d {
+            tmp += (ptr_in[2 * j + i] + ptr_in[2 * j + 2 * d - i]) * DOWNSAMP_FILT[i];
+            i += 2;
+        }
+        ptr_out[j] = tmp;
+    }
+    n
+}
+
+const INTERPOL_FILT_C: [f32; 2 * PITCH_INTERPOL_DELAY_C] = [
+    -0.0024414062,
+    0.023925781,
+    -0.119628906,
+    0.59814453,
+    0.59814453,
+    -0.119628906,
+    0.023925783,
+    -0.0024414062,
+];
+
+/// `upsamp_E_core`: writes `2*len` samples backwards from `y` using `x` (read backwards). Even taps
+/// copy `x`, odd taps average adjacent. `y_end`/`x_end` are the indices of the LAST written/read.
+fn upsamp_e_core(buf: &mut [f32], x_end: usize, y_end: usize, len: usize) {
+    let mut xi = x_end as isize;
+    let mut yi = y_end as isize;
+    for _ in 0..len {
+        let v = (buf[xi as usize] + buf[(xi + 1) as usize]) * 0.5;
+        buf[yi as usize] = v;
+        yi -= 1;
+        buf[yi as usize] = buf[xi as usize];
+        yi -= 1;
+        xi -= 1;
+    }
+}
+
+/// `upsamp_C_core`: like upsamp_E but the interpolated sample uses the 8-tap `INTERPOL_FILT_C`.
+fn upsamp_c_core(buf: &mut [f32], x_end: usize, y_end: usize, len: usize) {
+    let mut xi = x_end as isize;
+    let mut yi = y_end as isize;
+    for _ in 0..len {
+        let mut tmp = 0.0f32;
+        for j in 0..PITCH_INTERPOL_DELAY_C {
+            let a = buf[(xi + j as isize - (PITCH_INTERPOL_DELAY_C as isize - 1)) as usize];
+            let b = buf[(xi + PITCH_INTERPOL_DELAY_C as isize - j as isize) as usize];
+            tmp += (a + b) * INTERPOL_FILT_C[j];
+        }
+        buf[yi as usize] = tmp;
+        yi -= 1;
+        buf[yi as usize] = buf[xi as usize];
+        yi -= 1;
+        xi -= 1;
+    }
+}
+
+#[inline]
+fn smpl_nrg(x: &[f32]) -> f32 {
+    x.iter().map(|&v| v * v).sum()
+}
+
+/// `smpl_get_maxi`: argmax; the C tree-reduction resolves ties to the FIRST index. A simple strict-`>`
+/// scan (lowest index wins) matches it (validated by the C TIEPROBE harness on this data).
+fn get_maxi(x: &[f32]) -> usize {
+    let mut bi = 0usize;
+    let mut best = x[0];
+    for n in 1..x.len() {
+        if x[n] > best {
+            best = x[n];
+            bi = n;
+        }
+    }
+    bi
+}
+
+/// `smpl_get_maxi_K`: K highest-value indices. The C `naive_maxi_k` (ascending masked-max, strict `>`,
+/// lowest-index-wins) is the validated equivalent of the production tree selection. Returns them in
+/// selection order (descending value).
+fn get_maxi_k(x: &[f32], k: usize) -> Vec<usize> {
+    let mut taken = vec![false; x.len()];
+    let mut out = Vec::with_capacity(k);
+    for _ in 0..k {
+        let mut bi: isize = -1;
+        let mut best = f32::MIN;
+        for n in 0..x.len() {
+            if !taken[n] && (bi < 0 || x[n] > best) {
+                best = x[n];
+                bi = n as isize;
+            }
+        }
+        if bi < 0 {
+            break;
+        }
+        taken[bi as usize] = true;
+        out.push(bi as usize);
+    }
+    out
+}
+
+// ---- E1 / C / E2 computation (smpl_pitch_util.c) ----
+
+/// `smpl_calc_E1`: running energy of `lag_subfrlen`-length windows ending just before lag `minpitch`,
+/// for each of `numlags` lags. `t` is the window-start anchor in `ltpbuf`.
+fn calc_e1_inner(
+    e1: &mut [f32],
+    ltpbuf: &[f32],
+    t: usize,
+    minpitch: i32,
+    maxpitch: i32,
+    lag_subfrlen: usize,
+) {
+    let numlags = (maxpitch - minpitch + 1) as usize;
+    let base = (t as i32 - minpitch) as usize; // &ltpbuf[t - minpitch]
+    let reg = &ltpbuf[base - (numlags - 1)..]; // reg[-i] for i in 0..numlags valid
+    // reg points at ltpbuf[t - minpitch]; we index reg[0], reg[-i], reg[lag_subfrlen - i].
+    let reg0 = base; // absolute index of reg[0]
+    e1[0] = smpl_nrg(&ltpbuf[reg0..reg0 + lag_subfrlen]).max(1e-9);
+    for i in 1..numlags {
+        let rm = ltpbuf[reg0 - i];
+        let rs = ltpbuf[reg0 + lag_subfrlen - i];
+        e1[i] = (e1[i - 1] + rm * rm - rs * rs).max(1e-9);
+    }
+    let _ = reg;
+}
+
+/// `smpl_pitch_calc_E1`: per-subframe E1 by computing an extended E1_ once then offsetting per subframe.
+fn calc_e1(
+    e1: &mut [f32],
+    ltpbuf: &[f32],
+    ltpbuf_len: usize,
+    numsubfrs: usize,
+    minpitch: i32,
+    maxpitch: i32,
+    lag_subfrlen: usize,
+) {
+    let numlags = (maxpitch - minpitch + 1) as usize;
+    let maxpitch_ = maxpitch + (numsubfrs as i32 - 1) * lag_subfrlen as i32;
+    let numlags_ = (maxpitch_ - minpitch + 1) as usize;
+    let t = ltpbuf_len - lag_subfrlen;
+    let mut e1_ext = vec![0.0f32; numlags_];
+    calc_e1_inner(&mut e1_ext, ltpbuf, t, minpitch, maxpitch_, lag_subfrlen);
+    let mut offset = (numlags_ - numlags) as isize;
+    for sf in 0..numsubfrs {
+        for i in 0..numlags {
+            e1[sf * numlags + i] = e1_ext[(offset + i as isize) as usize];
+        }
+        offset -= lag_subfrlen as isize;
+    }
+}
+
+fn dot_prod(a: &[f32], b: &[f32], n: usize) -> f32 {
+    let mut r = 0.0f32;
+    for i in 0..n {
+        r += a[i] * b[i];
+    }
+    r
+}
+
+/// `smpl_pitch_calc_C_E2`: stage-1 cross-correlation `C` (8-sample dot, NUM_LAGS_STAGE1 lags/subframe)
+/// and per-subframe target energy `E2`.
+fn calc_c_e2(c: &mut [f32], e2: &mut [f32], ltpbuf: &[f32], ltpbuf_len: usize, numsubfrs: usize) {
+    let mut t = ltpbuf_len - LAG_SUBFRLEN_STAGE1 as usize * numsubfrs;
+    for sf in 0..numsubfrs {
+        let tgt = &ltpbuf[t..t + 20];
+        let reg0 = (t as i32 - MINPITCH_STAGE1) as usize;
+        for i in 0..NUM_LAGS_STAGE1 {
+            // dot_prod_20(tgt, &reg[-i]) where reg=&ltpbuf[reg0]
+            let r = &ltpbuf[reg0 - i..reg0 - i + 20];
+            c[sf * NUM_LAGS_STAGE1 + i] = dot_prod(tgt, r, 20);
+        }
+        t += LAG_SUBFRLEN_STAGE1 as usize;
+        e2[sf] = dot_prod(tgt, tgt, 20).max(1e-9);
+    }
+}
+
+/// `smpl_upsamp_E_fast`: in-place 2x upsample of a per-subframe E array, high subframe first.
+fn upsamp_e_fast(buf: &mut [f32], numsubfrs: usize, minpitch: &mut i32, numlags: &mut usize) {
+    let nin = *numlags;
+    let nout = (nin - 1) * 2;
+    for sf in (0..numsubfrs).rev() {
+        let x_end = sf * nin + nin - 2;
+        let y_end = sf * nout + nout - 1;
+        upsamp_e_core(buf, x_end, y_end, nin - 1);
+    }
+    *numlags = nout;
+    *minpitch *= 2;
+}
+
+/// `smpl_upsamp_C_fast`: in-place 2x upsample of a per-subframe C array using the interpolation filter.
+fn upsamp_c_fast(buf: &mut [f32], numsubfrs: usize, minpitch: &mut i32, numlags: &mut usize) {
+    let nin = *numlags;
+    let nout = (nin - PITCH_INTERPOL_DELAY_C) * 2;
+    for sf in (0..numsubfrs).rev() {
+        let x_end = sf * nin + nin - 1 - PITCH_INTERPOL_DELAY_C;
+        let y_end = sf * nout + nout - 1;
+        upsamp_c_core(buf, x_end, y_end, nin - (PITCH_INTERPOL_DELAY_C * 2 - 1));
+    }
+    *numlags = nout;
+    *minpitch *= 2;
+}
+
+fn dot_prod_40(a: &[f32], b: &[f32]) -> f32 {
+    let mut r = 0.0f32;
+    for i in 0..40 {
+        r += a[i] * b[i];
+    }
+    r
+}
+
+fn sumdeltas(laginds: &[i32], numsubfrs: usize) -> i32 {
+    let mut ret = 0;
+    for i in 1..numsubfrs {
+        ret += (laginds[i] - laginds[i - 1]).abs();
+    }
+    ret
+}
+
+/// `smpl_encode_lags(.., pEcCtx=NULL, mode)`: the rate (bits) the lag indices would cost, used as a
+/// survivor bias. Mirrors the n_bits accumulation of the C (no entropy coding side-effects).
+fn encode_lags_bits(
+    tab: &PitchTables,
+    blocksegs_ix: usize,
+    laginds: &[i32],
+    prev_lagblk: i32,
+    prev_lagidx: i32,
+    mode: usize,
+) -> f32 {
+    let mut n_bits = 0.0f32;
+    let ix_julia = tab.blocksegs2idx[blocksegs_ix] as i32;
+    let blocksize = PITCHBLOCK_MS * FS_KHZ * 2; // 64
+    let pblockseg = &tab.blocksegs[blocksegs_ix];
+    let mut prev_lagblk = prev_lagblk;
+    let mut prev_lagidx = prev_lagidx;
+
+    if prev_lagblk < 0 {
+        let cmf = &tab.blockseg_idx_cmf;
+        n_bits += ec_encode_bits(
+            cmf[(ix_julia - 1) as usize],
+            cmf[ix_julia as usize],
+            cmf[tab.blocksegs.len()],
+        );
+    } else {
+        let cmf = &tab.block_transition_cmf[prev_lagblk as usize];
+        let b0 = pblockseg.blocks[0];
+        n_bits += ec_encode_bits(cmf[b0], cmf[b0 + 1], cmf[PITCH_NUM_BLOCKS]);
+        let start_ix = tab.firstblock_range[b0][0] as i32;
+        let cmf_len = (tab.firstblock_range[b0][1] - tab.firstblock_range[b0][0] + 1) as i32;
+        let cmf = &tab.blockseg_idx_cmf[start_ix as usize..];
+        let lo = (ix_julia - start_ix - 1) as usize;
+        let hi = (ix_julia - start_ix) as usize;
+        n_bits += ec_encode_bits(
+            cmf[lo] - cmf[0],
+            cmf[hi] - cmf[0],
+            cmf[cmf_len as usize] - cmf[0],
+        );
+    }
+
+    let mut blk = pblockseg.blocks[0] as i32;
+    let mut delta_blk = blk - prev_lagblk;
+    let mut start_seg = 0usize;
+    let mut laginds_ix = 0usize;
+    if !((prev_lagblk > -1) && (-1..=2).contains(&delta_blk)) {
+        n_bits += 6.0; // uniform first-lag cost (log2 blocksize)
+        prev_lagblk = blk;
+        prev_lagidx = laginds[laginds_ix];
+        laginds_ix += pblockseg.seglens[0];
+        start_seg = 1;
+    }
+    let delta_lag_cmf = &tab.delta_lag_cmfs[mode];
+    for k in start_seg..pblockseg.nblocks {
+        blk = pblockseg.blocks[k] as i32;
+        let idx = laginds[laginds_ix];
+        laginds_ix += pblockseg.seglens[k];
+        delta_blk = blk - prev_lagblk;
+        let delta_idx = idx - prev_lagidx;
+        let prev_lagidx_mod = prev_lagidx - prev_lagblk * blocksize;
+        let delta_range_start = -prev_lagidx_mod + delta_blk * blocksize;
+        let cmf_base = (delta_range_start + 2 * blocksize - 1) as usize;
+        let ix = (delta_idx - delta_range_start) as usize;
+        let p0 = delta_lag_cmf[cmf_base];
+        n_bits += ec_encode_bits(
+            delta_lag_cmf[cmf_base + ix] - p0,
+            delta_lag_cmf[cmf_base + ix + 1] - p0,
+            delta_lag_cmf[cmf_base + blocksize as usize] - p0,
+        );
+        prev_lagblk = blk;
+        prev_lagidx = idx;
+    }
+    n_bits
+}
+
+/// `ec_encode_wrap` with `pEcCtx==NULL`: returns the symbol's bit cost `-log2((fh-fl)/ft)`.
+fn ec_encode_bits(fl: u32, fh: u32, ft: u32) -> f32 {
+    let p = (fh as f32 - fl as f32) / ft as f32;
+    if p <= 0.0 { 0.0 } else { -p.log2() }
+}
+
+/// Faithful port of C `smpl_encode_lags` (`pEcCtx != NULL`): write the blockseg selector + the
+/// per-40-block lag indices (`laginds`) to the range stream. This IS the voiced lag wire encode, the
+/// inverse of `decode_smpl_pitch`'s contour reconstruction. `prev_lagblk`/`prev_lagidx` are the C
+/// `ParamsEncoder` lag predictor (-1 on the first frame of a packet / after a no-match); `mode` selects
+/// the delta-lag CMF (0/1/2 by the mean ACB gain). The decoder rebuilds the exact per-block contour
+/// from these bits, so its voiced ACB basis matches the encoder's.
+pub(crate) fn smpl_encode_lags_wire(
+    tab: &PitchTables,
+    enc: &mut super::rangecoder::RangeEncoder,
+    blocksegs_ix: usize,
+    laginds: &[i32; NUM_SUBFRAMES],
+    prev_lagblk: i32,
+    prev_lagidx: i32,
+    mode: usize,
+) {
+    let ix_julia = tab.blocksegs2idx[blocksegs_ix] as i32;
+    let blocksize = PITCHBLOCK_MS * FS_KHZ * 2; // 64
+    let pblockseg = &tab.blocksegs[blocksegs_ix];
+    let mut prev_lagblk = prev_lagblk;
+    let mut prev_lagidx = prev_lagidx;
+
+    // Blockseg selector: absolute (CMF over all blocksegs) when no predictor, else block-transition
+    // CMF for blocks[0] followed by the first-block-range CMF.
+    if prev_lagblk < 0 {
+        let cmf = &tab.blockseg_idx_cmf;
+        enc.encode(
+            cmf[(ix_julia - 1) as usize],
+            cmf[ix_julia as usize],
+            cmf[tab.blocksegs.len()],
+        );
+    } else {
+        let cmf = &tab.block_transition_cmf[prev_lagblk as usize];
+        let b0 = pblockseg.blocks[0];
+        enc.encode(cmf[b0], cmf[b0 + 1], cmf[PITCH_NUM_BLOCKS]);
+        let start_ix = tab.firstblock_range[b0][0] as i32;
+        let cmf_len = (tab.firstblock_range[b0][1] - tab.firstblock_range[b0][0] + 1) as i32;
+        let cmf = &tab.blockseg_idx_cmf[start_ix as usize..];
+        let lo = (ix_julia - start_ix - 1) as usize;
+        let hi = (ix_julia - start_ix) as usize;
+        enc.encode(
+            cmf[lo] - cmf[0],
+            cmf[hi] - cmf[0],
+            cmf[cmf_len as usize] - cmf[0],
+        );
+    }
+
+    let mut blk = pblockseg.blocks[0] as i32;
+    let mut delta_blk = blk - prev_lagblk;
+    let mut start_seg = 0usize;
+    let mut laginds_ix = 0usize;
+    if !((prev_lagblk > -1) && (-1..=2).contains(&delta_blk)) {
+        // First lag uniform-coded (`ec_encode(idx_mod, idx_mod+1, blocksize)`).
+        let idx_mod = (laginds[laginds_ix] - blk * blocksize) as u32;
+        enc.encode(idx_mod, idx_mod + 1, blocksize as u32);
+        prev_lagblk = blk;
+        prev_lagidx = laginds[laginds_ix];
+        laginds_ix += pblockseg.seglens[0];
+        start_seg = 1;
+    }
+    let delta_lag_cmf = &tab.delta_lag_cmfs[mode];
+    for k in start_seg..pblockseg.nblocks {
+        blk = pblockseg.blocks[k] as i32;
+        let idx = laginds[laginds_ix];
+        laginds_ix += pblockseg.seglens[k];
+        delta_blk = blk - prev_lagblk;
+        let delta_idx = idx - prev_lagidx;
+        let prev_lagidx_mod = prev_lagidx - prev_lagblk * blocksize;
+        let delta_range_start = -prev_lagidx_mod + delta_blk * blocksize;
+        let cmf_base = (delta_range_start + 2 * blocksize - 1) as usize;
+        let ix = (delta_idx - delta_range_start) as usize;
+        let p0 = delta_lag_cmf[cmf_base];
+        enc.encode(
+            delta_lag_cmf[cmf_base + ix] - p0,
+            delta_lag_cmf[cmf_base + ix + 1] - p0,
+            delta_lag_cmf[cmf_base + blocksize as usize] - p0,
+        );
+        prev_lagblk = blk;
+        prev_lagidx = idx;
+    }
+}
+
+/// The C `ParamsEncoder` lag predictor after `encode_lb_voiced`: `prev_lagblk = blocks[nblocks-1]`,
+/// `prev_lagidx = laginds[numsubfrs-1]`. Exposed so the analysis advances its mirror identically.
+pub(crate) fn smpl_lags_predictor_after(
+    tab: &PitchTables,
+    blocksegs_ix: usize,
+    laginds: &[i32; NUM_SUBFRAMES],
+) -> (i32, i32) {
+    let pblockseg = &tab.blocksegs[blocksegs_ix];
+    let last_blk = pblockseg.blocks[pblockseg.nblocks - 1] as i32;
+    (last_blk, laginds[NUM_SUBFRAMES - 1])
+}
+
+/// `spectral_harmonicity` with a per-survivor cache (keyed by harmonic bin). Reuses the classifier's
+/// recompute via `harm_strength_at` for a single value; the loop here threads the cache exactly as C.
+fn spectral_harmonicity_cached(
+    avg_lag: f32,
+    f2w: &[f32; F_LEN],
+    cache: &mut [f32],
+    reset: bool,
+) -> f32 {
+    const HARM_UNDEF: f32 = -10000.0;
+    if reset {
+        for c in cache.iter_mut() {
+            *c = HARM_UNDEF;
+        }
+    }
+    let inv_f2_step_hz = 2.0 * (F_LEN - 1) as f32 / 16000.0;
+    let harm_hz = 16000.0 / avg_lag;
+    let harm_ix = (harm_hz * 2.0 * inv_f2_step_hz).round() as i32;
+    // The classifier's recompute is the single source of truth (the C asserts the bin is in range; an
+    // out-of-range bin only arises from a degenerate lag and is handled there by a clamped recompute).
+    if harm_ix < 0 || harm_ix as usize >= cache.len() {
+        return harm_strength_at(avg_lag, f2w);
+    }
+    if cache[harm_ix as usize] > HARM_UNDEF {
+        return cache[harm_ix as usize];
+    }
+    let hs = harm_strength_at(avg_lag, f2w);
+    cache[harm_ix as usize] = hs;
+    hs
+}
+
+/// `smpl_pitch`: the full estimator. `ltp_buf` is the perceptually-weighted speech of length
+/// `MAX_LTP_BUF_LEN` (the last `PITCH_LOOKAHEAD_LEN` samples are lookahead). `f2` is the LPC power
+/// spectrum. `coded_as_active_voice` gates the search (false → unvoiced defaults). Mutates the
+/// cross-frame predictor in `st`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn smpl_pitch(
+    st: &mut PitchEstState,
+    ltp_buf: &[f32],
+    f2: &[f32; F_LEN],
+    coded_as_active_voice: bool,
+) -> PitchResult {
+    let tab = load_pitch_tables();
+    let numsubfrs = NUM_SUBFRAMES;
+    let l = MAX_LTP_BUF_LEN;
+    let look = PITCH_LOOKAHEAD_LEN;
+
+    if !coded_as_active_voice {
+        let min_lag = (MINPITCH_MS * FS_KHZ) as f32;
+        st.prev_lag = 0.0;
+        st.prev_pitch_corr = 0.0;
+        st.prev_lagblk = -1;
+        st.prev_lagidx = -1;
+        return PitchResult {
+            pitchcorr: 0.0,
+            lags: [min_lag; NUM_SUBFRAMES],
+            laginds: [0; NUM_SUBFRAMES],
+            avg_lag: min_lag,
+            harm_strength: 0.0,
+            blockseg_idx: 0,
+        };
+    }
+
+    // HP filter into ltp_buf_stage1[offset..], where offset = PITCH_DOWNSAMP_DELAY leading zeros.
+    let offset = PITCH_DOWNSAMP_DELAY;
+    let mut stage1 = vec![0.0f32; l + offset + 64]; // small slack
+    pitch_hp_filter(ltp_buf, &mut stage1[offset..offset + l]);
+    // ltp_buf_hp = stage1[offset .. offset + (L - look)]
+    let hp_len = l - look;
+    let ltp_buf_hp: Vec<f32> = stage1[offset..offset + hp_len].to_vec();
+
+    // Downsample stage1[0 .. L+offset] -> stage1_ds (reuse a fresh buffer; the C writes in place but
+    // we keep the HP signal we already copied out, so a separate output is equivalent).
+    let mut stage1_ds = vec![0.0f32; (l + offset) / 2 + 8];
+    let stage1_len = pitch_downsample(&stage1, l + offset, &mut stage1_ds);
+
+    let numlags0 = NUM_LAGS_STAGE1;
+    let mut e1 = vec![0.0f32; numlags0 * numsubfrs + 16];
+    calc_e1(
+        &mut e1,
+        &stage1_ds,
+        stage1_len,
+        numsubfrs,
+        MINPITCH_STAGE1,
+        MAXPITCH_STAGE1,
+        LAG_SUBFRLEN_STAGE1 as usize,
+    );
+    let mut e2 = vec![0.0f32; numsubfrs];
+    // C / E arrays are over-allocated: the upsample stages expand them in place to full-res widths.
+    let cap = (2 * FS_KHZ / STAGE1_FS_KHZ) as usize * NUM_LAGS_STAGE1 * numsubfrs + 64;
+    let mut c = vec![0.0f32; cap];
+    let mut e = vec![0.0f32; cap];
+    let mut c_stage1 = vec![0.0f32; numlags0 * numsubfrs];
+    calc_c_e2(&mut c_stage1, &mut e2, &stage1_ds, stage1_len, numsubfrs);
+    c[..numlags0 * numsubfrs].copy_from_slice(&c_stage1);
+
+    // E from sqrt-energy blend (stage 1).
+    let numlags = numlags0;
+    for sf in 0..numsubfrs {
+        let mut sqrt_e1 = vec![0.0f32; numlags];
+        for i in 0..numlags {
+            sqrt_e1[i] = (e1[sf * numlags + i] + 1e-30).sqrt();
+        }
+        let sqrt_e2 = (e2[sf] + 1e-30).sqrt();
+        for i in 0..numlags {
+            let tmp = 0.5 * (sqrt_e1[i] + sqrt_e2);
+            e[sf * numlags + i] = tmp * tmp;
+        }
+    }
+
+    // Upsample to coarse (16 kHz) resolution.
+    let mut minpitch_c = MINPITCH_STAGE1;
+    let mut numlags_c = numlags;
+    let mut minpitch_e = MINPITCH_STAGE1;
+    let mut numlags_e = numlags;
+    if LOW_COMPLEXITY {
+        upsamp_e_fast(&mut c, numsubfrs, &mut minpitch_c, &mut numlags_c);
+    } else {
+        upsamp_c_fast(&mut c, numsubfrs, &mut minpitch_c, &mut numlags_c);
+    }
+    upsamp_e_fast(&mut e, numsubfrs, &mut minpitch_e, &mut numlags_e);
+
+    let minpitch_coarse = COARSE_FS_KHZ * MINPITCH_MS;
+    let numlags_coarse = NUMLAGS_COARSE;
+    let offset_c0 = (minpitch_coarse - minpitch_c) as usize;
+    let offset_e0 = (minpitch_coarse - minpitch_e) as usize;
+
+    // H (coarse) and coarse copies.
+    let mut h = vec![0.0f32; numlags_coarse * numsubfrs * 2 + 64];
+    let mut h_coarse = vec![0.0f32; numlags_coarse * numsubfrs];
+    let mut c_coarse = vec![0.0f32; numlags_coarse * numsubfrs];
+    let mut e_coarse = vec![0.0f32; numlags_coarse * numsubfrs];
+    for sf in 0..numsubfrs {
+        for i in 0..numlags_coarse {
+            let cv = c[sf * numlags_c + offset_c0 + i];
+            let ev = e[sf * numlags_e + offset_e0 + i];
+            h[sf * numlags_coarse + i] = cv / ev;
+        }
+        h_coarse[sf * numlags_coarse..(sf + 1) * numlags_coarse]
+            .copy_from_slice(&h[sf * numlags_coarse..sf * numlags_coarse + numlags_coarse]);
+        for i in 0..numlags_coarse {
+            c_coarse[sf * numlags_coarse + i] = c[sf * numlags_c + offset_c0 + i];
+            e_coarse[sf * numlags_coarse + i] = e[sf * numlags_e + offset_e0 + i];
+        }
+    }
+
+    // Per-block coarse maxima -> Hblk.
+    let pitchblock_coarse = (PITCHBLOCK_MS * COARSE_FS_KHZ) as usize; // 32
+    let mut hblk = [[0.0f32; PITCH_NUM_BLOCKS]; NUM_SUBFRAMES];
+    for sf in 0..numsubfrs {
+        for block in 0..PITCH_NUM_BLOCKS {
+            let base = sf * numlags_coarse + block * pitchblock_coarse;
+            hblk[sf][block] = smpl_maximum(&h[base..base + pitchblock_coarse]);
+        }
+    }
+
+    // Block-track survivor selection.
+    let blocksize_fs = PITCHBLOCK * 2; // BLOCKSIZE = 64
+    let reduction_factor = 0.7f32;
+    let pitch_deltawght = PITCH_DELTAWGHT / blocksize_fs as f32;
+    let mut sf_wght = [0.0f32; NUM_SUBFRAMES];
+    {
+        let sum_e2: f32 = e2.iter().take(numsubfrs).sum();
+        for sf in 0..numsubfrs {
+            sf_wght[sf] = e2[sf] / sum_e2;
+        }
+    }
+    let num_blocktracks = tab.blocktracks.len();
+    let mut utils = vec![0.0f32; num_blocktracks];
+    for i in 0..num_blocktracks {
+        let bt = &tab.blocktracks[i];
+        let mut corr = 0.0f32;
+        for sf in 0..numsubfrs {
+            corr += hblk[sf][bt.track[sf]] * sf_wght[sf];
+        }
+        let shortlagbias1 = (MAXPITCH_LEN as f32 / ((bt.meanblock + 1.5) * PITCHBLOCK as f32)
+            - 1.0)
+            * PITCH_SHORTWGHT1;
+        utils[i] = 1.0 / (1.1 - corr)
+            - reduction_factor * PITCHBLOCK as f32 * pitch_deltawght * bt.trackdeltas
+            + shortlagbias1;
+    }
+    let track_idx = get_maxi_k(&utils, NUMSTATES1);
+
+    // Recompute full-res E1 over the HP signal.
+    let mut e1_fs = vec![0.0f32; numlags_e * numsubfrs + 16];
+    calc_e1(
+        &mut e1_fs,
+        &ltp_buf_hp,
+        l - look,
+        numsubfrs,
+        minpitch_e,
+        minpitch_e + numlags_e as i32 - 1,
+        LAG_SUBFRLEN as usize,
+    );
+
+    // uniqueblocks bitmask per subframe from the survivor tracks.
+    let mut uniqueblocks = [0u16; NUM_SUBFRAMES];
+    for &ti in &track_idx {
+        let track = &tab.blocktracks[ti].track;
+        for sf in 0..numsubfrs {
+            uniqueblocks[sf] |= 1 << track[sf];
+        }
+    }
+
+    let h_thres = if LOW_COMPLEXITY { 0.0 } else { 0.25 };
+    let offset_c = (MINPITCH_MS * FS_KHZ - minpitch_c) as usize;
+    let offset_e = (MINPITCH_MS * FS_KHZ - minpitch_e) as usize;
+    // Update C and E around survivor block peaks at full resolution.
+    for sf in 0..numsubfrs {
+        let mut mask = 1u16;
+        let c_ptr = offset_c + sf * numlags_c;
+        let e_ptr = offset_e + sf * numlags_e;
+        let e1_ptr = offset_e + sf * numlags_e;
+        let h_ptr = sf * NUMLAGS_FS;
+        // ltp_buf_ptr = &ltp_buf_hp[L - look + (sf - numsubfrs)*LAG_SUBFRLEN]
+        let ltp_off = ((l - look) as i32 + (sf as i32 - numsubfrs as i32) * LAG_SUBFRLEN) as usize;
+        let e2_sf = dot_prod_40(&ltp_buf_hp[ltp_off..], &ltp_buf_hp[ltp_off..]).max(1e-9);
+        e2[sf] = e2_sf;
+        let sqrt_e2 = (e2_sf + 1e-30).sqrt();
+        for block in 0..PITCH_NUM_BLOCKS {
+            if uniqueblocks[sf] & mask != 0 {
+                let mut sqrt_e1 = [0.0f32; PITCHBLOCK + 1];
+                for i in 0..PITCHBLOCK + 1 {
+                    sqrt_e1[i] = (e1_fs[e1_ptr + block * PITCHBLOCK + i] + 1e-30).sqrt();
+                }
+                for i in 0..PITCHBLOCK + 1 {
+                    let tmp = 0.5 * (sqrt_e1[i] + sqrt_e2);
+                    e[e_ptr + block * PITCHBLOCK + i] = 0.5 * tmp * tmp;
+                }
+                for i in 0..PITCHBLOCK {
+                    if h[h_ptr + block * PITCHBLOCK + i] > h_thres {
+                        let lag = (MINPITCH_LEN as usize) + block * PITCHBLOCK + i;
+                        let a = &ltp_buf_hp[ltp_off..];
+                        let b = &ltp_buf_hp[ltp_off - lag..];
+                        c[c_ptr + block * PITCHBLOCK + i] = 0.5 * dot_prod_40(a, b);
+                    }
+                }
+            }
+            mask <<= 1;
+        }
+    }
+
+    // Upsample C and E around survivor peaks to half-sample resolution and compute H (high to low).
+    let stride_c = PITCH_NUM_BLOCKS * 2 * PITCHBLOCK + offset_c; // per-subframe frac stride
+    let stride_e = PITCH_NUM_BLOCKS * 2 * PITCHBLOCK + offset_e;
+    for sf in (0..numsubfrs).rev() {
+        let c_ptr = offset_c + sf * numlags_c;
+        let c_ptr_frac = offset_c + sf * stride_c;
+        let e_ptr = offset_e + sf * numlags_e;
+        let e_ptr_frac = offset_e + sf * stride_e;
+        let h_ptr = sf * 2 * PITCHBLOCK * PITCH_NUM_BLOCKS;
+        let mut mask = 1u16 << (PITCH_NUM_BLOCKS - 1);
+        for block in (0..PITCH_NUM_BLOCKS).rev() {
+            if uniqueblocks[sf] & mask != 0 {
+                let ein = e_ptr + block * PITCHBLOCK;
+                let eout = e_ptr_frac + block * 2 * PITCHBLOCK;
+                upsamp_e_core(
+                    &mut e,
+                    ein + PITCHBLOCK - 1,
+                    eout + 2 * PITCHBLOCK - 1,
+                    PITCHBLOCK,
+                );
+                let cin = c_ptr + block * PITCHBLOCK;
+                let cout = c_ptr_frac + block * 2 * PITCHBLOCK;
+                if LOW_COMPLEXITY {
+                    upsamp_e_core(
+                        &mut c,
+                        cin + PITCHBLOCK - 1,
+                        cout + 2 * PITCHBLOCK - 1,
+                        PITCHBLOCK,
+                    );
+                } else {
+                    upsamp_c_core(
+                        &mut c,
+                        cin + PITCHBLOCK - 1,
+                        cout + 2 * PITCHBLOCK - 1,
+                        PITCHBLOCK,
+                    );
+                }
+                for i in 0..2 * PITCHBLOCK {
+                    h[h_ptr + block * 2 * PITCHBLOCK + i] = c[cout + i] / e[eout + i];
+                }
+            }
+            mask >>= 1;
+        }
+    }
+
+    // Fine search: per survivor, per blockseg, per block: combine H over the seg's subframes, argmax.
+    let mut laginds_surv: Vec<[i32; NUM_SUBFRAMES]> = Vec::new();
+    let mut blocksegs_ix_list: Vec<usize> = Vec::new();
+    let mut h_comb = vec![0.0f32; 2 * PITCHBLOCK];
+    let mut lagind_cache: std::collections::HashMap<i32, i32> = std::collections::HashMap::new();
+    for &idx in &track_idx {
+        let range = tab.blocksegs_ix[idx];
+        for j in 0..range[1] {
+            let bsx = range[0] + j;
+            let pblockseg = &tab.blocksegs[bsx];
+            let mut laginds_row = [0i32; NUM_SUBFRAMES];
+            let mut start_sf = 0usize;
+            for n in 0..pblockseg.nblocks {
+                let lookup_key = (((start_sf as i32) << 3) + pblockseg.seglens[n] as i32) << 4
+                    | pblockseg.blocks[n] as i32;
+                let best_i = if let Some(&v) = lagind_cache.get(&lookup_key) {
+                    v
+                } else {
+                    for v in h_comb.iter_mut() {
+                        *v = 0.0;
+                    }
+                    for sf in start_sf..start_sf + pblockseg.seglens[n] {
+                        let h_ptr = sf * 2 * PITCHBLOCK * PITCH_NUM_BLOCKS
+                            + pblockseg.blocks[n] * 2 * PITCHBLOCK;
+                        for i in 0..2 * PITCHBLOCK {
+                            h_comb[i] += h[h_ptr + i] * e2[sf];
+                        }
+                    }
+                    let bi = get_maxi(&h_comb) as i32;
+                    lagind_cache.insert(lookup_key, bi);
+                    bi
+                };
+                for sf in start_sf..start_sf + pblockseg.seglens[n] {
+                    laginds_row[sf] = best_i + (pblockseg.blocks[n] * 2 * PITCHBLOCK) as i32;
+                }
+                start_sf += pblockseg.seglens[n];
+            }
+            laginds_surv.push(laginds_row);
+            blocksegs_ix_list.push(bsx);
+        }
+    }
+    let nlaginds = laginds_surv.len();
+
+    // Final search.
+    let pitch_ratewght = if LOW_RATE { 0.028 } else { RATEWGHT_HR };
+    let f2w = build_f2w(f2);
+    let max_ix = get_maxi(&sf_wght[..numsubfrs]);
+    let mut spectral_harm_cache = vec![0.0f32; 50];
+
+    let mut best_util = 0.0f32;
+    let mut best_pitchcorr = 0.0f32;
+    let mut best_surv = 0usize;
+    let pitch_deltawght_fs = PITCH_DELTAWGHT / blocksize_fs as f32;
+
+    for surv in 0..nlaginds {
+        let mut sum_c = 0.0f32;
+        let mut sum_e = 0.0f32;
+        for sf in 0..numsubfrs {
+            let c_base = offset_c + sf * stride_c;
+            let e_base = offset_e + sf * stride_e;
+            let li = laginds_surv[surv][sf] as usize;
+            sum_c += c[c_base + li];
+            sum_e += e[e_base + li];
+        }
+        let rate_bias = encode_lags_bits(
+            tab,
+            blocksegs_ix_list[surv],
+            &laginds_surv[surv],
+            st.prev_lagblk,
+            st.prev_lagidx,
+            1,
+        ) * pitch_ratewght;
+        let mean_lag = laginds_surv[surv][max_ix] as f32 * 0.5 + MINPITCH_LEN as f32;
+        let pitchcorr = sum_c / sum_e;
+        let first_lag = 0.5 * laginds_surv[surv][0] as f32 + MINPITCH_LEN as f32;
+        let prev_lag_bias = get_prev_lag_bias(st, first_lag);
+        let spectral_harm_bias = SPEC_HARM_BIAS
+            * spectral_harmonicity_cached(mean_lag, &f2w, &mut spectral_harm_cache, surv == 0);
+        let util = 1.0 / (1.1 - pitchcorr)
+            - pitch_deltawght_fs * sumdeltas(&laginds_surv[surv], numsubfrs) as f32
+            + spectral_harm_bias
+            + prev_lag_bias
+            - rate_bias;
+        if surv == 0 || util > best_util {
+            best_util = util;
+            best_surv = surv;
+        }
+        if surv == 0 || pitchcorr > best_pitchcorr {
+            best_pitchcorr = pitchcorr;
+        }
+    }
+
+    let mut lags = [0.0f32; NUM_SUBFRAMES];
+    let mut laginds_out = [0i32; NUM_SUBFRAMES];
+    for sf in 0..numsubfrs {
+        lags[sf] = laginds_surv[best_surv][sf] as f32 * 0.5 + MINPITCH_LEN as f32;
+        laginds_out[sf] = laginds_surv[best_surv][sf];
+    }
+    let avg_lag = laginds_surv[best_surv][max_ix] as f32 * 0.5 + MINPITCH_LEN as f32;
+    // SMPL_PITCH_SPEC_HARM_BIAS is defined, so the final harmonicity reuses the survivor-loop cache.
+    let harm_strength = spectral_harmonicity_cached(avg_lag, &f2w, &mut spectral_harm_cache, false);
+
+    st.prev_lag = lags[numsubfrs - 1];
+    st.prev_pitch_corr = best_pitchcorr;
+    st.prev_lagidx = laginds_surv[best_surv][numsubfrs - 1];
+    st.prev_lagblk = st.prev_lagidx / (2 * PITCHBLOCK as i32);
+
+    PitchResult {
+        pitchcorr: best_pitchcorr,
+        lags,
+        laginds: laginds_out,
+        avg_lag,
+        harm_strength,
+        blockseg_idx: blocksegs_ix_list[best_surv],
+    }
+}
+
+fn smpl_maximum(x: &[f32]) -> f32 {
+    let mut m = x[0];
+    for &v in &x[1..] {
+        if v > m {
+            m = v;
+        }
+    }
+    m
+}
+
+fn get_prev_lag_bias(st: &PitchEstState, lag: f32) -> f32 {
+    let lag_diff = (lag - st.prev_lag).abs();
+    let diff_thres = PREVWGHT_SPAN * st.prev_lag;
+    if lag_diff < diff_thres {
+        st.prev_pitch_corr * (1.0 - lag_diff / diff_thres) * PREVWGHT
+    } else {
+        0.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    // Feed the C encoder's exact per-frame ltp_buf + F2 into the ported estimator (threading the
+    // cross-frame predictor + frame-boundary reset as the C does) and require the outputs to converge
+    // to the C `smpl_pitch`: pitchcorr (tight float tol), avg_lag, per-subframe laginds, blockseg_idx,
+    // harm_strength (cache-aliasing tol). This is the rigorous proof the estimator port is faithful.
+    #[test]
+    fn pitch_estimator_matches_c_ground_truth() {
+        let recs: Value =
+            serde_json::from_str(include_str!("testdata/pitchio_ground_truth.json")).unwrap();
+        let arr = recs.as_array().unwrap();
+        assert!(arr.len() >= 30, "expected >=30 records, got {}", arr.len());
+
+        // Thread prev_lag/prev_pitch_corr across frames (the estimator carries these), but seed
+        // prev_lagblk/prev_lagidx from the C dump per frame so the rate-bias survivor selection uses
+        // the exact predictor the C had (its reset timing depends on the voiced decision, out of scope
+        // for the isolated estimator test).
+        let mut st = PitchEstState::default();
+        let mut max_pc_err = 0.0f32;
+        let mut max_avglag_err = 0.0f32;
+        let mut max_harm_err = 0.0f32;
+        let mut lagind_mismatch = 0usize;
+        let mut bsx_mismatch = 0usize;
+        let mut checked = 0usize;
+        for rec in arr {
+            let _frame = rec["frame"].as_i64().unwrap();
+            let cav = rec["cav"].as_i64().unwrap() != 0;
+            st.prev_lagblk = rec["prev_lagblk"].as_i64().unwrap() as i32;
+            st.prev_lagidx = rec["prev_lagidx"].as_i64().unwrap() as i32;
+            let ltp_buf: Vec<f32> = rec["ltp_buf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_f64().unwrap() as f32)
+                .collect();
+            assert_eq!(ltp_buf.len(), MAX_LTP_BUF_LEN);
+            let f2v: Vec<f32> = rec["F2"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_f64().unwrap() as f32)
+                .collect();
+            let mut f2 = [0.0f32; F_LEN];
+            f2.copy_from_slice(&f2v);
+
+            let res = smpl_pitch(&mut st, &ltp_buf, &f2, cav);
+
+            if cav {
+                let pc_c = rec["pitchcorr"].as_f64().unwrap() as f32;
+                let avg_c = rec["avg_lag"].as_f64().unwrap() as f32;
+                let harm_c = rec["harm"].as_f64().unwrap() as f32;
+                let bsx_c = rec["blockseg_idx"].as_i64().unwrap() as usize;
+                let laginds_c: Vec<i32> = rec["laginds"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_i64().unwrap() as i32)
+                    .collect();
+                max_pc_err = max_pc_err.max((res.pitchcorr - pc_c).abs());
+                max_avglag_err = max_avglag_err.max((res.avg_lag - avg_c).abs());
+                max_harm_err = max_harm_err.max((res.harm_strength - harm_c).abs());
+                let lag_mm = (0..NUM_SUBFRAMES).any(|sf| res.laginds[sf] != laginds_c[sf]);
+                if res.blockseg_idx != bsx_c {
+                    bsx_mismatch += 1;
+                }
+                if lag_mm {
+                    lagind_mismatch += 1;
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked >= 20, "too few active frames checked: {checked}");
+        assert!(
+            max_pc_err < 1e-3,
+            "pitchcorr diverges from C: max_err={max_pc_err}"
+        );
+        assert!(
+            max_avglag_err < 1e-3,
+            "avg_lag diverges from C: max_err={max_avglag_err}"
+        );
+        assert_eq!(lagind_mismatch, 0, "per-subframe laginds diverge from C");
+        assert_eq!(bsx_mismatch, 0, "blockseg_idx diverges from C");
+        assert!(
+            max_harm_err < 0.05,
+            "harm_strength diverges beyond cache-aliasing tol: {max_harm_err}"
+        );
     }
 }
 ```
