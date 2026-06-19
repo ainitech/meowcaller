@@ -7,6 +7,16 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
 
 ## [Unreleased]
 
+### mlow/lpc
+- scaffolded: constants + the five public envelope functions (smplWindowLPC20,
+  smplLPCAnalyzeWithF2, smplLPCInterpol/Idx, smplA2NLSF16) with three-line stubs.
+  Tests wired to lsf_quant_io.json (forward A→NLSF, bit-exact) and fe_dump.json
+  (windowing exact + FFT-autocorr tolerance); both fail until implemented. The
+  cross-module qlsf round-trip test is skipped pending #06/#10.
+  Open: (a) smplLPCAnalyzeWithF2 needs a 512-pt real FFT (no module/datasheet yet);
+  (b) the registry's lsf_vectors.json pins the LSF wire (#05/#06), not this
+  front-end — lpc validates against lsf_quant_io.json + fe_dump.json.
+
 ### mlow/mem
 - implemented: SmplMem accessors (LE U8/U16/U32, signed I16/I32, out-of-region
   zero fallback, CDFAt 2-byte stride). Heap ROM loaded via go:embed from
