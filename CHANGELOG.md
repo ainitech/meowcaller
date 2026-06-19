@@ -7,6 +7,16 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
 
 ## [Unreleased]
 
+### mlow/gains — module #09 KAT-verified (reference `ed12f35`)
+- Implemented `DecodeSmplGains` 1:1 from `decode_smpl_gains`: main+delta gain CDFs,
+  the gain reconstruction (deliberate adjacent-rodata read via the heap window), and
+  the per-subframe bucketed nrgres CDF with the gain-derived sign-mask address shift.
+  Signed arithmetic shifts (`>>14`, `>>31`) kept on `int32`; address math `wrapping`
+  on `uint32`.
+- KAT `TestDecodeSmplGains` passes: LSF(0)→pulses(0)→gains reproduces `gain_q[]` and
+  `nrg_res[]` for every `gains_vectors.json` frame. CodeRabbit: 0 findings.
+- No unbuilt requisites — the chain (LSF #05, pulses #08) was already done.
+
 ### mlow/pulse — module #08 KAT-verified (reference `ed12f35`)
 - Implemented the excitation pulse decode 1:1 from `decode_smpl_pulses`: the
   triangular pulse-count prior (NB/config-0 path), the recursive subframe split
