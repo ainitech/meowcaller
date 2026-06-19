@@ -8,6 +8,12 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
 ## [Unreleased]
 
 ### Planning
+- Datasheets for all 28 modules under `datasheets/`: each carries the reference
+  source verbatim, the Go envelope (signatures only), and implementation
+  suggestions. Verbatim source verified complete (line-count match vs source);
+  7 initially-truncated sheets re-pasted in full.
+
+### Planning
 - Project framework: `PLAN.md` (engineering plan), `AGENTS.md` (human-audited
   module-by-module build protocol), `SPEC.md` (module registry + datasheet index),
   per-module datasheets under `spec/`.
