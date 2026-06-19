@@ -84,8 +84,11 @@ meowcaller/
   datasheets/   per-module datasheets
 ```
 
-Pure-Go dependencies only. The codec package has **no** third-party dependencies.
-Every `.go` file carries the project license header.
+Pure-Go dependencies only, and minimal: the sole third-party dependency is
+`google.golang.org/protobuf` (the protobuf runtime, as whatsmeow itself uses) for
+decoding the embedded table blobs, which share a `.proto` schema with the reference.
+No other third-party dependencies in the codec. Every `.go` file carries the project
+license header.
 
 ---
 

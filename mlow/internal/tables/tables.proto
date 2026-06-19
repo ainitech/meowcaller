@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package mlow.tables;
+
+option go_package = "github.com/purpshell/meowcaller/mlow/internal/tables";
+
+// The embedded MLow heap window: the runtime-built table regions plus the
+// table-base pointers. Stored zlib-compressed.
+message HeapWindow {
+  repeated Region regions = 1;
+  uint32 g_cc = 2;
+  uint32 g_nrg = 3;
+  uint32 g_pitch = 4;
+  uint32 g_clk = 5;
+}
+
+// One contiguous heap region: its absolute base address and bytes.
+message Region {
+  uint32 base = 1;
+  bytes data = 2;
+}

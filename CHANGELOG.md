@@ -7,6 +7,15 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
 
 ## [Unreleased]
 
+### mlow/mem — protobuf table blob (reference `b90291b`)
+- The reference now stores the cc_blob heap window as a zlib-compressed protobuf
+  (`tables.proto`). meowcaller adopts the **shared schema**: embeds the reference's
+  exact `smpl_cc_blob.bin` and decodes it through the generated `internal/tables`
+  package (zlib inflate + `proto.Unmarshal`). Dropped the JSON embed and the local
+  `genmem` generator. New (sole) third-party dep `google.golang.org/protobuf` — as
+  whatsmeow uses; PLAN.md updated. KAT still green (pointers/accessors unchanged);
+  mem SOT permalinks re-pinned to `b90291b`.
+
 ### reference sync — local checkout to `oxidezap/whatsapp-rust-private`@`674e851`
 - Converted the local Rust reference into a real git checkout of
   `oxidezap/whatsapp-rust-private` (branch `feat/voip-media-stack`) and reset to the

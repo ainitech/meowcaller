@@ -9,15 +9,10 @@ the pulse/pitch/gains and LSF decode paths read through.
 backs (the decode paths that consume the heap window and cosine table are pinned by
 it). The heap window loads from `smpl_cc_blob.json`.
 
-> **Reference packaging change (patch `d441e5fa…current`).** Upstream now ships the
-> heap window and runtime tables as zlib+postcard `.bin` blobs
-> (`smpl_cc_blob.bin`, `smpl_tables.bin`, loaded via `smpl_tables_blob::load_blob`),
-> and the `.json` dumps are gitignored generator input. meowcaller keeps the
-> **JSON** form: we `go:embed mlow/smpl_cc_blob.json` and base64-decode at load (a
-> documented deviation — the decoded bytes are **identical**, verified: same 3
-> regions and pointers `g_cc/g_nrg/g_pitch/clk`). We do not depend on the Rust
-> `postcard` encoding. The decode-path KAT will use `smpl_tables.json` (== the new
-> `smpl_tables.bin` content).
+> The heap window is stored as a zlib-compressed protobuf `HeapWindow`
+> (`tables.proto`), loaded via `smpl_tables_blob::load_blob_prost`. meowcaller
+> embeds the same `smpl_cc_blob.bin` and decodes it through the shared `tables.proto`
+> schema (compiled to `mlow/internal/tables`).
 
 ## Reference source (verbatim — authoritative)
 
@@ -31,18 +26,27 @@ it). The heap window loads from `smpl_cc_blob.json`.
 
 use std::sync::OnceLock;
 
-#[derive(serde::Serialize, serde::Deserialize)]
+/// `tables.proto` Region.
+#[derive(Clone, PartialEq, prost::Message)]
 struct SmplMemRegion {
+    #[prost(uint32, tag = "1")]
     base: u32,
+    #[prost(bytes = "vec", tag = "2")]
     data: Vec<u8>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+/// `tables.proto` HeapWindow; `smpl_cc_blob.bin` is this message, zlib-compressed.
+#[derive(Clone, PartialEq, prost::Message)]
 pub(crate) struct SmplMem {
+    #[prost(message, repeated, tag = "1")]
     regions: Vec<SmplMemRegion>,
+    #[prost(uint32, tag = "2")]
     pub(crate) g_cc: u32,
+    #[prost(uint32, tag = "3")]
     pub(crate) g_nrg: u32,
+    #[prost(uint32, tag = "4")]
     pub(crate) g_pitch: u32,
+    #[prost(uint32, tag = "5")]
     pub(crate) g_clk: u32,
 }
 
@@ -87,7 +91,7 @@ pub(crate) fn parse_smpl_mem_json(s: &str) -> SmplMem {
 
 pub(crate) fn load_smpl_mem() -> &'static SmplMem {
     SMPL_MEM.get_or_init(|| {
-        super::smpl_tables_blob::load_blob(include_bytes!("testdata/smpl_cc_blob.bin"))
+        super::smpl_tables_blob::load_blob_prost(include_bytes!("testdata/smpl_cc_blob.bin"))
     })
 }
 
@@ -132,6 +136,30 @@ impl SmplMem {
             .map(|i| self.u16(addr.wrapping_add((i as u32) * 2)))
             .collect()
     }
+}
+```
+
+### Heap-window protobuf schema
+
+```proto
+syntax = "proto3";
+
+package mlow.tables;
+
+// The embedded MLow heap window: the runtime-built table regions plus the
+// table-base pointers. Stored zlib-compressed.
+message HeapWindow {
+  repeated Region regions = 1;
+  uint32 g_cc = 2;
+  uint32 g_nrg = 3;
+  uint32 g_pitch = 4;
+  uint32 g_clk = 5;
+}
+
+// One contiguous heap region: its absolute base address and bytes.
+message Region {
+  uint32 base = 1;
+  bytes data = 2;
 }
 ```
 
