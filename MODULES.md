@@ -32,7 +32,7 @@ confirmed when the module is reached.
 | 11 | noise | `mlow` | — | mlow-noise.md | `mlow/smpl_gennoise.rs` | `gennoise_vectors.json` | verified (gennoise core; perc/bitrate scaffolded w/ encoder) |
 | 12 | vad | `mlow` | — | mlow-vad.md | `mlow/smpl_vad.rs` | `vad_ground_truth.json` | verified |
 | 13 | synth | `mlow` | lsf, lsf_quant, postfilter, noise | mlow-synth.md | `mlow/smpl_synth.rs`, `smpl_celpdec.rs` | (e2e) | partial (reconstruct + CELP excitation verified; SynthInternalFrame impl/NOT-VALIDATED; full PCM e2e at decoder) |
-| 14 | red | `mlow` | rangecoder, toc | mlow-red.md | `mlow/red.rs` | (inline) | planned |
+| 14 | red | `mlow` | rangecoder, toc | mlow-red.md | `mlow/red.rs` | (inline) | verified |
 | 15 | decoder | `mlow` | lsf, pulse, pitch, gains, synth, postfilter, noise, red | mlow-decoder.md | `mlow/decoder.rs` | `e2e_vectors.json`, `inbound_capture_frames.json` | planned |
 | 16 | encoder | `mlow` | lpc, lsf_quant, pitch, vad | mlow-encoder.md | `mlow/encode.rs`, `analysis.rs` | `sigmode_ground_truth.json` | planned |
 | 17 | hkdf | `util` | — | util-hkdf.md | (stdlib) | RFC 5869 | planned |

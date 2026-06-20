@@ -7,6 +7,14 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
 
 ## [Unreleased]
 
+### mlow/red — module #14 KAT-verified (reference `ed12f359a086b28e807ba236f0977af1000859fe`)
+- Implemented `DepackSplitRed` 1:1 from `red.rs`: the SplitRed header run (redundant
+  blocks `0x80|code`,`size`), the main marker, and frame extraction as zero-copy
+  subslices, with the four sentinel errors. KAT `TestDepackSplitRed` covers the
+  reference's inline cases (one redundant+main, header-only+main, empty, bare-frame
+  rejection). CodeRabbit: 0 findings.
+
+
 ### mlow/vad — module #12 KAT-verified (reference `ed12f359a086b28e807ba236f0977af1000859fe`)
 - Implemented the SILK VAD fixed-point port 1:1 from `smpl_vad.rs`: the SILK
   primitives (smulwb/smlawb/smulww/smulbb/smlabb, sat16, clz/ror/lin2log/sqrt_approx/
