@@ -30,7 +30,7 @@ confirmed when the module is reached.
 | 09 | lsf_quant | `mlow` | lpc | mlow-lsf_quant.md | `mlow/smpl_lsf_quant.rs` | `lsf_quant_io.json` | verified |
 | 10 | postfilter | `mlow` | — | mlow-postfilter.md | `mlow/smpl_*postfilter.rs`, `smpl_harmcomb.rs` | (e2e) | verified (HP comb + harmonic; Region-1 comb gated/stub) |
 | 11 | noise | `mlow` | — | mlow-noise.md | `mlow/smpl_gennoise.rs` | `gennoise_vectors.json` | verified (gennoise core; perc/bitrate scaffolded w/ encoder) |
-| 12 | vad | `mlow` | — | mlow-vad.md | `mlow/smpl_vad.rs` | `vad_ground_truth.json` | planned |
+| 12 | vad | `mlow` | — | mlow-vad.md | `mlow/smpl_vad.rs` | `vad_ground_truth.json` | verified |
 | 13 | synth | `mlow` | lsf, lsf_quant, postfilter, noise | mlow-synth.md | `mlow/smpl_synth.rs`, `smpl_celpdec.rs` | (e2e) | partial (reconstruct + CELP excitation verified; SynthInternalFrame impl/NOT-VALIDATED; full PCM e2e at decoder) |
 | 14 | red | `mlow` | rangecoder, toc | mlow-red.md | `mlow/red.rs` | (inline) | planned |
 | 15 | decoder | `mlow` | lsf, pulse, pitch, gains, synth, postfilter, noise, red | mlow-decoder.md | `mlow/decoder.rs` | `e2e_vectors.json`, `inbound_capture_frames.json` | planned |

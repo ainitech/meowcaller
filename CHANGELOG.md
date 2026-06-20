@@ -7,6 +7,19 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
 
 ## [Unreleased]
 
+### mlow/vad — module #12 KAT-verified (reference `ed12f359a086b28e807ba236f0977af1000859fe`)
+- Implemented the SILK VAD fixed-point port 1:1 from `smpl_vad.rs`: the SILK
+  primitives (smulwb/smlawb/smulww/smulbb/smlabb, sat16, clz/ror/lin2log/sqrt_approx/
+  sigm_q15, rshift_round), the 2-band allpass filterbank (incl. the in-place stages),
+  HP filter, GetNoiseLevels, GetSA_Q8, and the per-packet DTX hangover.
+- KAT `TestVadGroundTruth` matches the C enc_dump (smpl_VAD_GetSA_Q8_c) on
+  `mic_clip.raw`: per-frame `spact` (<1e-4) and packet `coded_as_active_voice` exact.
+  CodeRabbit: 0 findings. (Reused `silkInt16Max` from lpc.go.)
+- Also folds in two earlier doc changes (no separate commit, all local): the AGENTS.md
+  rule that MODULES.md Status must track KAT reality (CR flags / agent fixes), and the
+  stale-status corrections (rangecoder/mem/toc/lpc → verified).
+
+
 ### mlow/celpdec — CELP synthesis: excitation verified, full output e2e (reference `ed12f359a086b28e807ba236f0977af1000859fe`)
 - Implemented the decoder-side C-float CELP synthesis (`CelpDecState.SynthFrame` +
   `lpcInterpol`, `acbDequant`/`acbSynthesize`, `pitchSharp`, `synLTPBasis`,
