@@ -12,8 +12,6 @@ import (
 // HKDF-SHA256 vectors (Test Cases 1-3): extract-and-expand must reproduce the
 // expected OKM byte-for-byte at the requested length.
 func TestHKDFSHA256RFC5869(t *testing.T) {
-	t.Skip("blocked: HKDFSHA256 body is a stub; enable when implemented")
-
 	raw, err := os.ReadFile("testdata/rfc5869_hkdf_sha256.json")
 	if err != nil {
 		t.Fatalf("read rfc5869_hkdf_sha256.json: %v", err)

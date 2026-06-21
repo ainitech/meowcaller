@@ -7,16 +7,16 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
 
 ## [Unreleased]
 
-### util/hkdf — module #17 scaffolded (reference `41095d4e6ba4610e054e9ede3af1d5e88a83faee`)
+### util/hkdf — module #17 KAT-verified (reference `41095d4e6ba4610e054e9ede3af1d5e88a83faee`)
 - New `util` package: `HKDFSHA256(salt, ikm, info, length)` — the single
   HKDF-SHA256 extract-and-expand primitive every VoIP key schedule reduces to.
-  Signature + doc + `Source of truth` pin (`wacore/src/voip/mod.rs#L32-L39`), body
-  is a TODO stub. KAT (`util/testdata/rfc5869_hkdf_sha256.json`, RFC 5869 Appendix A
-  Test Cases 1-3) wired but `t.Skip`'d until the body lands (suite stays green).
-  Datasheet `util-hkdf.md` refreshed to the current reference (doc reword +
-  `debug_assert!` bound) and pinned. **scaffolded**. Open decisions for the human:
-  stdlib `crypto/hkdf` (zero new deps, Go 1.25) vs the datasheet's `x/crypto/hkdf`;
-  and panic vs error on the >8160-byte overflow.
+  Implemented over the **Go 1.25 stdlib `crypto/hkdf`** (zero new deps; `x/crypto`
+  avoided per the protobuf-only mandate); the reference's `.expect()`/`debug_assert`
+  on the >8160-byte (255*32) bound maps to a panic since the signature has no error
+  return. KAT (`util/testdata/rfc5869_hkdf_sha256.json`, RFC 5869 Appendix A Test
+  Cases 1-3) passes byte-exact. Datasheet `util-hkdf.md` refreshed to the current
+  reference (doc reword + `debug_assert!` bound) and pinned. CodeRabbit: clean.
+  **KAT-verified**.
 
 ### mlow — seed-ROM table architecture (port of the upstream refactor)
 - **pitch tables** now expand from a 2.3 KB seed ROM (`pitch_seed.bin`) instead of

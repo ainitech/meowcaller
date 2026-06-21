@@ -35,7 +35,7 @@ confirmed when the module is reached.
 | 14 | red | `mlow` | rangecoder, toc | mlow-red.md | `mlow/red.rs` | (inline) | verified |
 | 15 | decoder | `mlow` | lsf, pulse, pitch, gains, synth, postfilter, noise, red | mlow-decoder.md | `mlow/decoder.rs` | `e2e_vectors.json`, `inbound_capture_frames.json` | verified (e2e corr 0.99 vs useSmpl) |
 | 16 | encoder | `mlow` | lpc, lsf_quant, pitch, vad | mlow-encoder.md | `mlow/encode.rs`, `analysis.rs` | `sigmode_ground_truth.json` | verified (full encoder: classifier sigmode KAT, byte-exact entropy coder on 61 frames, pitch estimator exact, CELP + analysis wired; encode->decode tone roundtrip corr 0.89) |
-| 17 | hkdf | `util` | — | util-hkdf.md | (stdlib) | RFC 5869 | scaffolded |
+| 17 | hkdf | `util` | — | util-hkdf.md | (stdlib) | RFC 5869 | verified |
 | 18 | e2e_srtp | `srtp` | hkdf | srtp-e2e.md | `e2e_srtp.rs` | inline | planned |
 | 19 | hbh_srtp | `srtp` | hkdf | srtp-hbh.md | `hbh_srtp.rs` | inline | planned |
 | 20 | sframe | `srtp` | hkdf | srtp-sframe.md | `sframe.rs` | inline | planned |
