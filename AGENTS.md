@@ -180,9 +180,16 @@ Comments earn their place or they do not exist:
   lives under `wacore/src/voip/mlow/`; srtp/signaling/transport sources
   (`sframe.rs`, `stanza.rs`, `stun.rs`, `rtp.rs`, …) sit directly under
   `wacore/src/voip/`. Locate the real file before linking — do not assume `mlow/`.
-  Later, when a specific logic branch has a wacrg decision artifact, its link goes
-  in this same slot (a second `// Source of truth:` line at that branch). This is
-  the one place the reference may be named in code.
+  A function's header line pins the **commit that introduced the body** (its impl
+  commit) at the function's line range — not the current reference tip. When you
+  later **modify** that function to port a change from a newer reference commit,
+  **leave the header on the original impl commit** and add a per-change
+  `// Source of truth:` line directly above each changed block, pinned to that
+  change's impl commit and line range. A modified function thus carries its original
+  header plus one extra line per ported change. Later, when a specific logic branch
+  has a wacrg decision artifact, its link goes in this same slot (a second
+  `// Source of truth:` line at that branch). This is the one place the reference
+  may be named in code.
 - **The three-line stub block** (`// TODO` / `// agent suggestion: ...` /
   `// human input:`) — an unfinished body, per the scaffolding standard above. The
   three lines exist only while the body is a stub and are removed when it lands.
@@ -209,6 +216,32 @@ Comments earn their place or they do not exist:
 Do **not** narrate what the code plainly does, and do **not** use comments to
 explain *why* — say the why out loud. Clean code is the default; comments are the
 exception.
+
+## Porting floating-point code (bit-exactness)
+
+When the reference's float op order is load-bearing — matmul accumulation,
+sqrt-then-reciprocal, any expanded table the codec later reads — the Go port must be
+bit-for-bit identical, not merely "close". Two traps that have already cost real time:
+
+- **FMA contraction.** Go's compiler fuses `a*b + c` into a single fused
+  multiply-add (one rounding) on amd64/arm64, which diverges ~1 ULP from a reference
+  that rounds the multiply and the add separately (Rust/LLVM does not fuse by
+  default). A plain temporary does **not** stop it — the Go spec permits fusion
+  *across statements*. The only reliable fix is an **explicit `float32(...)`
+  conversion around the multiply itself**: `prod := float32(a * b); y += prod`. Wrap
+  every load-bearing product that feeds an add.
+- **float64-cast transcendentals.** `sqrt`/`log2`/`cos` written as
+  `float32(math.Sqrt(float64(x)))` match the reference's f32 op for `sqrt`
+  (double-rounding is benign there) but can differ a few ULP for `log2` and friends.
+  Expect ≤ a few ULP on transcendental-derived table fields.
+
+Validate a regenerated or expanded table two ways: (1) cross-check against the
+reference's **own golden constants** (e.g. its `to_bits` checksums) for a true
+cross-implementation bit match, and (2) field-by-field against the prior artifact —
+integer and non-transcendental floats must be **bit-identical**; sqrt/log2-derived
+fields within a stated ULP bound. The decisive gate is always the downstream KAT: if
+decode/encode stays bit-exact, a bounded float divergence on derived fields is
+benign (state the bound, don't hide it).
 
 ## Commits and changelog
 
