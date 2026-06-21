@@ -31,20 +31,13 @@ type SmplPitchResult struct {
 // DecodeSmplPitch decodes the LTP gains and pitch lags. p3 = num subframes,
 // p6 = config, subfrCounts = per-subframe pulse counts (from the pulse decode).
 func DecodeSmplPitch(dec *RangeDecoder, mem *SmplMem, st *SmplLsfState, p2, p3, p6 int32, subfrCounts [4]int32) SmplPitchResult {
-	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/ed12f359a086b28e807ba236f0977af1000859fe/wacore/src/voip/mlow/smpl_pitch.rs#L32-L198
+	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4/wacore/src/voip/mlow/smpl_pitch.rs#L44-L198
 	res := SmplPitchResult{FiltIdx: [4]int32{-1, -1, -1, -1}}
-	gp := mem.GPitch
+	cc := LoadCcTables()
 
-	// --- LTP gains loop --- (both selects key on p6; WB takes the first operand)
-	weightTab := uint32(0xe85b0)
-	gainCdfBase := gp + 0x302
-	if p6 != 0 {
-		weightTab = 0xe8460
-		gainCdfBase = gp + 0xc0
-	}
-	filtCdf0 := gp + 0xdc4 // 35-sym, when prev_filt_idx == -1
-	filtCdf1 := gp + 0xe4c // 35-sym, indexed by -prev_filt_idx*2
-
+	// --- LTP gains loop (Group C, served from CcTables; the lag block below still
+	// reads the Group-D heap window via mem). Both selects key on p6 (active WB path
+	// is p6==0 HR; the p6!=0 LR variant); the filter CDFs are shared across p6.
 	var gainAccum int32
 	take := int(p3)
 	if take > 4 {
@@ -52,21 +45,29 @@ func DecodeSmplPitch(dec *RangeDecoder, mem *SmplMem, st *SmplLsfState, p2, p3, 
 	}
 	for sf := 0; sf < take; sf++ {
 		cnt := subfrCounts[sf]
-		row := gainCdfBase + uint32(st.PrevGainIdx*0x22) + 0x22
-		gi := dec.DecodeCDF(mem.CDFAt(row, 17))
+		var gi int32
+		if p6 != 0 {
+			gi = dec.DecodeCDF(cc.AcbgainRowLr(st.PrevGainIdx))
+		} else {
+			gi = dec.DecodeCDF(cc.AcbgainRow(st.PrevGainIdx))
+		}
 		res.GainIdx[sf] = gi
 		st.PrevGainIdx = gi
 
-		w0 := int32(mem.I16(weightTab + uint32(gi)*4))
-		w2 := int32(mem.I16(weightTab + uint32(gi)*4 + 2))
+		var w0, w2 int32
+		if p6 != 0 {
+			w0, w2 = cc.AcbgainWeightsLr(gi)
+		} else {
+			w0, w2 = cc.AcbgainWeights(gi)
+		}
 		gainAccum += w0 + 2*w2
 
 		if cnt > 0 {
 			var fi int32
 			if st.PrevFiltIdx == -1 {
-				fi = dec.DecodeCDF(mem.CDFAt(filtCdf0, 35))
+				fi = dec.DecodeCDF(cc.FcbgainV())
 			} else {
-				fi = dec.DecodeCDF(mem.CDFAt(filtCdf1-uint32(st.PrevFiltIdx)*2, 35))
+				fi = dec.DecodeCDF(cc.FcbgainVDelta(st.PrevFiltIdx))
 			}
 			res.FiltIdx[sf] = fi
 			st.PrevFiltIdx = fi

@@ -31,14 +31,14 @@ type SmplPulseResult struct {
 // DecodeSmplPulses decodes the pulse blocks of one internal frame. p2 = frame
 // samples (320), p3 = num subframes (4), p4 = regular flag (1), p6 = config (0/1),
 // s1 = LSF stage-1 selector.
-func DecodeSmplPulses(dec *RangeDecoder, mem *SmplMem, p2, p3, p4, p6, s1 int32) SmplPulseResult {
-	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/ed12f359a086b28e807ba236f0977af1000859fe/wacore/src/voip/mlow/smpl_pulse.rs#L29-L206
+func DecodeSmplPulses(dec *RangeDecoder, _ *SmplMem, p2, p3, p4, p6, s1 int32) SmplPulseResult {
+	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4/wacore/src/voip/mlow/smpl_pulse.rs#L26-L185
 	n := p2
 	if n < 0 {
 		n = 0
 	}
 	res := SmplPulseResult{Pulses: make([]int32, n)}
-	gCC := mem.GCC
+	cc := LoadCcTables()
 
 	idx := p4 + s1
 	bByte := int32(Mem8Static(0xe8990 + uint32(p6*3+idx)))
@@ -52,12 +52,8 @@ func DecodeSmplPulses(dec *RangeDecoder, mem *SmplMem, p2, p3, p4, p6, s1 int32)
 	// --- pulse COUNT ---
 	var total int32
 	if p6 != 0 {
-		// WB: a CDF table read.
-		ent := gCC + uint32(idx)*8
-		cdfp := mem.U32(ent + 0x11d8)
-		cnt := int(mem.U32(ent + 0x11dc))
-		cdf := mem.CDFAt(cdfp, cnt)
-		total = dec.DecodeCDF(cdf)
+		// WB low-rate: the pulse-count CDF for this voicing class.
+		total = dec.DecodeCDF(cc.NPulseCount(idx))
 	} else {
 		// NB (config=0, our path): a TRIANGULAR prior over [0, frame_len4k].
 		l := uint32(frameLen4k)
@@ -107,18 +103,16 @@ func DecodeSmplPulses(dec *RangeDecoder, mem *SmplMem, p2, p3, p4, p6, s1 int32)
 		}
 		hiBound := total - lo
 		if sum < hiBound {
-			cdfp := mem.U32(gCC + uint32(total)*8 + 0xcd0)
-			off := cdfp + uint32(sum)*2 - uint32(lo)*2
-			cdf := mem.CDFAt(off, int((hiBound-sum)+2))
-			sum += dec.DecodeCDF(cdf)
+			// window the split CDF at (sum - lo); n entries from the table base.
+			sum += dec.DecodeCDF(cdfWindow(cc.SplitCmf(total), int(sum-lo), int((hiBound-sum)+2)))
 		}
 		if sum > 0 {
-			s0 := smplSplit3537(dec, mem, sum, subfrLen16, gCC+0xcd8)
+			s0 := smplSplit3537(dec, cc, sum, subfrLen16)
 			split[0] = s0
 			split[1] = sum - s0
 		}
 		if sum < total {
-			s2 := smplSplit3537(dec, mem, total-sum, subfrLen16, gCC+0xcd8)
+			s2 := smplSplit3537(dec, cc, total-sum, subfrLen16)
 			split[2] = s2
 			split[3] = (total - sum) - s2
 		}
@@ -158,12 +152,10 @@ func DecodeSmplPulses(dec *RangeDecoder, mem *SmplMem, p2, p3, p4, p6, s1 int32)
 				break // defensive: malformed frame must not drive a huge CDF length
 			}
 			oct := (pos + 7) / 8
-			magBase := gCC + uint32(oct)*0xa4
-			cBaseOff := int64(mem.U32(magBase))
-			cdfp := mem.U32(magBase + uint32(c-1)*4 - 0xa0)
-			off := cdfp + uint32((cBaseOff-int64(pos))*2)
-			cdf := mem.CDFAt(off, int(pos+1))
-			m := dec.DecodeCDF(cdf)
+			// window the c-pulses run-length CDF by (max_samples - pos), reading pos+1 entries.
+			bucket := cc.Runlen(oct)
+			start := int(bucket.MaxSamples() - pos)
+			m := dec.DecodeCDF(cdfWindow(bucket.Cmf(c), start, int(pos+1)))
 			res.MagRuns = append(res.MagRuns, m)
 			if m > 0 || k == 0 {
 				pulseIdx++
@@ -216,9 +208,9 @@ func DecodeSmplPulses(dec *RangeDecoder, mem *SmplMem, p2, p3, p4, p6, s1 int32)
 }
 
 // smplSplit3537 splits count pulses across a range, returning the count assigned to
-// the first half (func 3537).
-func smplSplit3537(dec *RangeDecoder, mem *SmplMem, count, granularity int32, base uint32) int32 {
-	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/ed12f359a086b28e807ba236f0977af1000859fe/wacore/src/voip/mlow/smpl_pulse.rs#L208-L230
+// the first half (func 3537). The split CDF now comes from the seed-built CcTables.
+func smplSplit3537(dec *RangeDecoder, cc *CcTables, count, granularity int32) int32 {
+	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4/wacore/src/voip/mlow/smpl_pulse.rs#L188-L201
 	lo := count
 	if granularity < lo {
 		lo = granularity
@@ -233,8 +225,6 @@ func smplSplit3537(dec *RangeDecoder, mem *SmplMem, count, granularity int32, ba
 	if minSplit == lo {
 		return minSplit
 	}
-	cdfp := mem.U32(base + uint32(count)*8 - 8)
-	off := cdfp + uint32(minSplit)*2
-	cdf := mem.CDFAt(off, int((lo-minSplit)+2))
-	return dec.DecodeCDF(cdf) + minSplit
+	n := int((lo - minSplit) + 2)
+	return dec.DecodeCDF(cdfWindow(cc.SplitCmf(count), int(minSplit), n)) + minSplit
 }

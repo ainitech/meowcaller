@@ -22,6 +22,13 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
   Cross-checked **byte-identical to the old `cc_blob`** for every group it replaces
   (`TestCcTablesVsOldBlob`). Decode/encode rewiring to these accessors + the Group-D
   `SmplMem` rebuild + dropping `smpl_cc_blob.bin` follow.
+- **cc seed wired + `smpl_cc_blob.bin` dropped**: decode (`gains.go`/`pulse.go`/
+  `pitch.go` gain loop) and encode (`encoder.go`) now read the `CcTables` accessors
+  instead of the heap window for Groups A/B/C/E. `SmplMem` is rebuilt from the pitch
+  seed (`buildSmplMemFromSeed`) serving only the Group-D pitch lag/contour window
+  (GCC/GNrg = 0). The ~102 KB `smpl_cc_blob.bin` is removed. All decode/encode KATs
+  stay bit-exact (e2e decode corr 0.9867, byte-exact entropy, pitch contour, tone
+  round-trip). Every new function carries its `// Source of truth:` pin.
 
 ### mlow — upstream sync (reference `ed12f35..41095d4`): robustness guards
 - Ported the two codec-behavioral fixes from the upstream review commit `543302e`

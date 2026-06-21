@@ -1,24 +1,9 @@
 package mlow
 
 import (
-	"bytes"
-	"compress/zlib"
-	_ "embed"
 	"encoding/binary"
-	"io"
 	"sync"
-
-	"google.golang.org/protobuf/proto"
-
-	"github.com/purpshell/meowcaller/mlow/internal/tables"
 )
-
-// smplCCBlob is the embedded heap window — the runtime-built CDF tables plus the
-// table-base pointers — as a zlib-compressed protobuf HeapWindow. The blob and its
-// tables.proto schema are shared verbatim with the reference.
-//
-//go:embed smpl_cc_blob.bin
-var smplCCBlob []byte
 
 type smplMemRegion struct {
 	base uint32
@@ -36,40 +21,108 @@ type SmplMem struct {
 	GClk    uint32
 }
 
+// Fixed WASM-build globals for the Group-D heap layout (smpl_mem.rs). The window is
+// built at these absolute addresses so the pitch lag/contour pointer-chase lands
+// unchanged.
+const (
+	memGClk          = 0xb9f9a8
+	memGPitch        = 0xb9d378
+	memPcfg          = memGClk + 0x5704
+	memHdrContourMap = 0xe7c10
+	memHdrLagCdf     = 0xbaa7b0
+	memHdrFracBase   = 0xbaa9be
+	memHdrDeltaCdf   = 0xbab13e
+	memDeltaBounds   = 0xe7ef0
+	memNumContours   = 217
+)
+
+var memHdrUnused = [3]uint32{0xe7d20, 0xe7ef0, 0xe8096}
+
+func u16Bytes(v []uint32) []byte {
+	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4/wacore/src/voip/mlow/smpl_mem.rs#L129-L130
+	b := make([]byte, len(v)*2)
+	for i, x := range v {
+		binary.LittleEndian.PutUint16(b[2*i:], uint16(x))
+	}
+	return b
+}
+
+// buildSmplMemFromSeed builds the pitch lag/contour (Group D) heap window from the
+// pitch seed (port of smpl_mem.rs build_smpl_mem), reproducing the carved window
+// byte-for-byte at every address the consumer reads. Groups A/B/C/E moved to the
+// logical CcTables, so GCC/GNrg are 0 here.
+func buildSmplMemFromSeed() *SmplMem {
+	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4/wacore/src/voip/mlow/smpl_mem.rs#L90-L156
+	w := buildContourWindow()
+	var regions []smplMemRegion
+	push := func(base uint32, data []byte) { regions = append(regions, smplMemRegion{base: base, data: data}) }
+
+	var r0 []byte
+	put32 := func(x int32) {
+		var b [4]byte
+		binary.LittleEndian.PutUint32(b[:], uint32(x))
+		r0 = append(r0, b[:]...)
+	}
+	for _, rec := range w.records {
+		blocks, seglens := rec[0], rec[1]
+		for i := 0; i < 8; i++ {
+			v := 0
+			if i < len(blocks) {
+				v = blocks[i]
+			}
+			put32(int32(v))
+		}
+		for i := 0; i < 8; i++ {
+			v := 0
+			if i < len(seglens) {
+				v = seglens[i]
+			}
+			put32(int32(v))
+		}
+		put32(int32(len(blocks)))
+	}
+	put32(187) // NUM_BLOCKTRACKS gap
+	for _, h := range []uint32{memNumContours, memHdrContourMap, memHdrLagCdf, memHdrFracBase, memHdrUnused[0], memHdrUnused[1], memHdrUnused[2], memHdrDeltaCdf} {
+		var b [4]byte
+		binary.LittleEndian.PutUint32(b[:], h)
+		r0 = append(r0, b[:]...)
+	}
+	push(memPcfg+0x1d38, r0)
+
+	push(memHdrLagCdf, u16Bytes(w.lagCdf))
+	var frac []uint32
+	for _, c := range w.fracCmfs {
+		frac = append(frac, c...)
+	}
+	push(memHdrFracBase, u16Bytes(frac))
+	var delta []uint32
+	for _, c := range w.deltaCmfs {
+		delta = append(delta, c...)
+	}
+	push(memHdrDeltaCdf, u16Bytes(delta))
+	push(memHdrContourMap, append([]byte(nil), w.contourMap...))
+
+	bounds := make([]byte, 0, len(w.firstblockRange)*2+2)
+	for _, p := range w.firstblockRange {
+		bounds = append(bounds, byte(p[0]), byte(p[1]))
+	}
+	bounds = append(bounds, 0, 0)
+	push(memDeltaBounds, bounds)
+
+	return &SmplMem{regions: regions, GCC: 0, GNrg: 0, GPitch: memGPitch, GClk: memGClk}
+}
+
 var (
 	smplMemOnce sync.Once
 	smplMem     *SmplMem
 )
 
-// LoadSmplMem decodes the embedded heap blob once and returns the shared,
-// read-only window.
+// LoadSmplMem builds the pitch lag/contour (Group D) heap window from the pitch seed
+// once and returns the shared, read-only window. Groups A/B/C/E moved to the logical
+// CcTables (cc_tables.go), so this no longer reads a cc_blob snapshot.
 func LoadSmplMem() *SmplMem {
-	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/b90291b1ae979d504adf71d9555b3daf5c7325b1/wacore/src/voip/mlow/smpl_tables_blob.rs#L32-L35
-	smplMemOnce.Do(func() {
-		zr, err := zlib.NewReader(bytes.NewReader(smplCCBlob))
-		if err != nil {
-			panic("mlow: open heap blob: " + err.Error())
-		}
-		raw, err := io.ReadAll(zr)
-		if err != nil {
-			panic("mlow: inflate heap blob: " + err.Error())
-		}
-		_ = zr.Close()
-		var hw tables.HeapWindow
-		if err := proto.Unmarshal(raw, &hw); err != nil {
-			panic("mlow: decode heap blob: " + err.Error())
-		}
-		m := &SmplMem{
-			GCC:    hw.GetGCc(),
-			GNrg:   hw.GetGNrg(),
-			GPitch: hw.GetGPitch(),
-			GClk:   hw.GetGClk(),
-		}
-		for _, r := range hw.GetRegions() {
-			m.regions = append(m.regions, smplMemRegion{base: r.GetBase(), data: r.GetData()})
-		}
-		smplMem = m
-	})
+	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4/wacore/src/voip/mlow/smpl_mem.rs#L158-L160
+	smplMemOnce.Do(func() { smplMem = buildSmplMemFromSeed() })
 	return smplMem
 }
 

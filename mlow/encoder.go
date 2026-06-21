@@ -355,9 +355,9 @@ func encodeSmplLsf(enc *RangeEncoder, t *SmplTables, st *SmplLsfState, config, i
 // encodeSmplPulses is the inverse of DecodeSmplPulses (config=0 NB count, p3=4):
 // re-derive the count interval and split symbols from the per-subframe counts, then
 // replay the recorded magnitude/sign symbols.
-func encodeSmplPulses(enc *RangeEncoder, mem *SmplMem, p2, p3, p4, p6, s1 int32, pp *SmplPulseParams) {
-	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/ed12f359a086b28e807ba236f0977af1000859fe/wacore/src/voip/mlow/encode.rs#L153-L271
-	gCC := mem.GCC
+func encodeSmplPulses(enc *RangeEncoder, _ *SmplMem, p2, p3, p4, p6, s1 int32, pp *SmplPulseParams) {
+	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4/wacore/src/voip/mlow/encode.rs#L153-L271
+	cc := LoadCcTables()
 	idx := p4 + s1
 	bByte := int32(Mem8Static(0xe8990 + uint32(p6*3+idx)))
 	frameLen4k := bByte * p2 / 320
@@ -400,16 +400,14 @@ func encodeSmplPulses(enc *RangeEncoder, mem *SmplMem, p2, p3, p4, p6, s1 int32,
 	}
 	hiBound := total - lo
 	if initSum < hiBound {
-		cdfp := mem.U32(gCC + uint32(total)*8 + 0xcd0)
-		off := cdfp + uint32(initSum)*2 - uint32(lo)*2
-		cdf := mem.CDFAt(off, int((hiBound-initSum)+2))
+		cdf := cdfWindow(cc.SplitCmf(total), int(initSum-lo), int((hiBound-initSum)+2))
 		enc.EncodeCDF(finalSum-initSum, cdf)
 	}
 	if finalSum > 0 {
-		encodeSplit3537(enc, mem, finalSum, subfrLen16, gCC+0xcd8, pp.Subfr[0])
+		encodeSplit3537(enc, cc, finalSum, subfrLen16, pp.Subfr[0])
 	}
 	if finalSum < total {
-		encodeSplit3537(enc, mem, total-finalSum, subfrLen16, gCC+0xcd8, pp.Subfr[2])
+		encodeSplit3537(enc, cc, total-finalSum, subfrLen16, pp.Subfr[2])
 	}
 
 	// --- MAGNITUDE block: replay recorded run-length symbols through the same loop ---
@@ -425,14 +423,11 @@ func encodeSmplPulses(enc *RangeEncoder, mem *SmplMem, p2, p3, p4, p6, s1 int32,
 		k := int32(0)
 		for k < cnt {
 			oct := (pos + 7) / 8
-			magBase := gCC + uint32(oct)*0xa4
-			cBaseOff := int64(mem.U32(magBase))
-			cdfp := mem.U32(magBase + uint32(c-1)*4 - 0xa0)
-			off := cdfp + uint32((cBaseOff-int64(pos))*2)
+			bucket := cc.Runlen(oct)
+			start := int(bucket.MaxSamples() - pos)
 			m := pp.MagRuns[magIdx]
 			magIdx++
-			cdf := mem.CDFAt(off, int(pos+1))
-			enc.EncodeCDF(m, cdf)
+			enc.EncodeCDF(m, cdfWindow(bucket.Cmf(c), start, int(pos+1)))
 			if m > 0 || k == 0 {
 				pos -= m
 			}
@@ -448,8 +443,8 @@ func encodeSmplPulses(enc *RangeEncoder, mem *SmplMem, p2, p3, p4, p6, s1 int32,
 }
 
 // encodeSplit3537 is the inverse of smplSplit3537: encode the first-half count s0.
-func encodeSplit3537(enc *RangeEncoder, mem *SmplMem, count, granularity int32, base uint32, s0 int32) {
-	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/ed12f359a086b28e807ba236f0977af1000859fe/wacore/src/voip/mlow/encode.rs#L273-L292
+func encodeSplit3537(enc *RangeEncoder, cc *CcTables, count, granularity int32, s0 int32) {
+	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4/wacore/src/voip/mlow/encode.rs#L273-L292
 	lo := count
 	if granularity < lo {
 		lo = granularity
@@ -461,38 +456,31 @@ func encodeSplit3537(enc *RangeEncoder, mem *SmplMem, count, granularity int32, 
 	if lo < minSplit || minSplit == lo {
 		return
 	}
-	cdfp := mem.U32(base + uint32(count)*8 - 8)
-	off := cdfp + uint32(minSplit)*2
-	cdf := mem.CDFAt(off, int((lo-minSplit)+2))
+	cdf := cdfWindow(cc.SplitCmf(count), int(minSplit), int((lo-minSplit)+2))
 	enc.EncodeCDF(s0-minSplit, cdf)
 }
 
 // encodeSmplGains is the inverse of DecodeSmplGains: encode main/delta gain, then
 // per-subframe nrgres with the same gain-derived address shift.
-func encodeSmplGains(enc *RangeEncoder, mem *SmplMem, p3 int32, subfrCounts [4]int32, gp *SmplGainParams) {
-	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/ed12f359a086b28e807ba236f0977af1000859fe/wacore/src/voip/mlow/encode.rs#L294-L335
-	gNrg := mem.GNrg
-	enc.EncodeCDF(gp.GainMain, mem.CDFAt(gNrg+0x1362, 85))
-	enc.EncodeCDF(gp.GainDelta, mem.CDFAt(gNrg+0x1098, 99))
+func encodeSmplGains(enc *RangeEncoder, _ *SmplMem, p3 int32, subfrCounts [4]int32, gp *SmplGainParams) {
+	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4/wacore/src/voip/mlow/encode.rs#L294-L335
+	cc := LoadCcTables()
+	enc.EncodeCDF(gp.GainMain, cc.NrgresGain4())
+	enc.EncodeCDF(gp.GainDelta, cc.NrgresShape4())
 	cfgSel := int32(2)
 
-	gainTabAddr := uint32(0xf3970)
-	if p3 == 4 {
-		gainTabAddr = 0xf35f0
-	}
 	off6 := p3 * gp.GainDelta
-	base7 := gp.GainMain*int32(mem.I16(0xf35e0+uint32(cfgSel)*2)) - 0x154000
+	base7 := gp.GainMain*cc.NrgStep(cfgSel) - 0x154000
 	var gainQ [4]int32
 	take := int(p3)
 	if take > 4 {
 		take = 4
 	}
 	for sf := 0; sf < take; sf++ {
-		cbv := int32(mem.I16(gainTabAddr + uint32(int32(sf)+off6)*2))
+		cbv := cc.GainRecon(p3 == 4, int32(sf)+off6)
 		gainQ[sf] = base7 + (cbv << 4)
 	}
 
-	nrgBase := gNrg + uint32(cfgSel)*0x588
 	for sf := 0; sf < take; sf++ {
 		cnt := subfrCounts[sf]
 		if cnt <= 0 {
@@ -504,31 +492,22 @@ func encodeSmplGains(enc *RangeEncoder, mem *SmplMem, p3 int32, subfrCounts [4]i
 		} else {
 			bucket = (cnt & 0xffff) / 10
 		}
-		cdfp := nrgBase + uint32(bucket)*0x162
 		g := (gainQ[sf] + 8192) >> 14
 		if g < -85 {
 			g = -85
 		}
 		negPart := (g >> 31) & g
-		off := cdfp - uint32(negPart<<1)
-		enc.EncodeCDF(gp.NrgRes[sf], mem.CDFAt(off, 92))
+		minOffset := int(-negPart)
+		enc.EncodeCDF(gp.NrgRes[sf], cc.FcbgOffset(int(cfgSel), int(bucket), minOffset))
 	}
 }
 
 // encodeSmplPitch is the inverse of DecodeSmplPitch: encode the LTP gains/filters,
 // then the lag contour (blockseg selector + per-block lag indices) via the pitch
 // tables, mutating the predictor state identically.
-func encodeSmplPitch(enc *RangeEncoder, mem *SmplMem, st *SmplLsfState, p2, p3, p6 int32, subfrCounts [4]int32, pp *SmplPitchParams) {
-	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/ed12f359a086b28e807ba236f0977af1000859fe/wacore/src/voip/mlow/encode.rs#L337-L405
-	gp := mem.GPitch
-	weightTab := uint32(0xe85b0)
-	gainCdfBase := gp + 0x302
-	if p6 != 0 {
-		weightTab = 0xe8460
-		gainCdfBase = gp + 0xc0
-	}
-	filtCdf0 := gp + 0xdc4
-	filtCdf1 := gp + 0xe4c
+func encodeSmplPitch(enc *RangeEncoder, _ *SmplMem, st *SmplLsfState, p2, p3, p6 int32, subfrCounts [4]int32, pp *SmplPitchParams) {
+	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4/wacore/src/voip/mlow/encode.rs#L337-L405
+	cc := LoadCcTables()
 
 	var gainAccum int32
 	take := int(p3)
@@ -537,19 +516,26 @@ func encodeSmplPitch(enc *RangeEncoder, mem *SmplMem, st *SmplLsfState, p2, p3, 
 	}
 	for sf := 0; sf < take; sf++ {
 		cnt := subfrCounts[sf]
-		row := gainCdfBase + uint32(st.PrevGainIdx*0x22) + 0x22
 		gi := pp.GainIdx[sf]
-		enc.EncodeCDF(gi, mem.CDFAt(row, 17))
+		if p6 != 0 {
+			enc.EncodeCDF(gi, cc.AcbgainRowLr(st.PrevGainIdx))
+		} else {
+			enc.EncodeCDF(gi, cc.AcbgainRow(st.PrevGainIdx))
+		}
 		st.PrevGainIdx = gi
-		w0 := int32(mem.I16(weightTab + uint32(gi)*4))
-		w2 := int32(mem.I16(weightTab + uint32(gi)*4 + 2))
+		var w0, w2 int32
+		if p6 != 0 {
+			w0, w2 = cc.AcbgainWeightsLr(gi)
+		} else {
+			w0, w2 = cc.AcbgainWeights(gi)
+		}
 		gainAccum += w0 + 2*w2
 		if cnt > 0 {
 			fi := pp.FiltIdx[sf]
 			if st.PrevFiltIdx == -1 {
-				enc.EncodeCDF(fi, mem.CDFAt(filtCdf0, 35))
+				enc.EncodeCDF(fi, cc.FcbgainV())
 			} else {
-				enc.EncodeCDF(fi, mem.CDFAt(filtCdf1-uint32(st.PrevFiltIdx)*2, 35))
+				enc.EncodeCDF(fi, cc.FcbgainVDelta(st.PrevFiltIdx))
 			}
 			st.PrevFiltIdx = fi
 		}

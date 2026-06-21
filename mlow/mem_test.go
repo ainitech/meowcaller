@@ -11,22 +11,22 @@ func loadMem(t *testing.T) *SmplMem {
 	return m
 }
 
-// TestLoadSmplMem checks the blob loads and the table-base pointers match the
-// values dumped in smpl_cc_blob.json.
+// TestLoadSmplMem checks the seed-built Group-D window: 6 regions, GPitch/GClk at the
+// fixed WASM addresses, and GCC/GNrg zero (Groups A/B/C/E moved to CcTables).
 func TestLoadSmplMem(t *testing.T) {
 	m := loadMem(t)
-	if len(m.regions) != 3 {
-		t.Errorf("regions: got %d want 3", len(m.regions))
+	if len(m.regions) != 6 {
+		t.Errorf("regions: got %d want 6", len(m.regions))
 	}
 	for _, c := range []struct {
 		name string
 		got  uint32
 		want uint32
 	}{
-		{"GCC", m.GCC, 11993344},
-		{"GNrg", m.GNrg, 12182936},
-		{"GPitch", m.GPitch, 12178296},
-		{"GClk", m.GClk, 12188072},
+		{"GCC", m.GCC, 0},
+		{"GNrg", m.GNrg, 0},
+		{"GPitch", m.GPitch, 12178296}, // 0xb9d378
+		{"GClk", m.GClk, 12188072},     // 0xb9f9a8
 	} {
 		if c.got != c.want {
 			t.Errorf("%s: got %d want %d", c.name, c.got, c.want)
@@ -39,7 +39,7 @@ func TestLoadSmplMem(t *testing.T) {
 // 2-byte CDFAt stride.
 func TestSmplMemAccessors(t *testing.T) {
 	m := loadMem(t)
-	addr := m.GCC // inside region 0
+	addr := uint32(memPcfg + 0x1d38) // inside the Group-D records region
 
 	if uint16(m.U32(addr)) != m.U16(addr) {
 		t.Errorf("U32 low 16 bits %#x != U16 %#x", uint16(m.U32(addr)), m.U16(addr))

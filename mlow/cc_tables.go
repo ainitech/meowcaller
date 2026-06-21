@@ -36,10 +36,12 @@ const (
 func ccSmulbb(a, b int32) int32 { return int32(int16(a)) * int32(int16(b)) }
 
 func ccSmlawb(a, b, c int32) int32 {
+	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4/wacore/src/voip/mlow/smpl_cc_tables.rs#L18-L21
 	return int32(int64(a) + ((int64(b) * int64(int16(c))) >> 16))
 }
 
 func ccClzFrac(in int32) (int32, int32) {
+	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4/wacore/src/voip/mlow/smpl_cc_tables.rs#L24-L30
 	u := uint32(in)
 	lz := int32(bits.LeadingZeros32(u))
 	fracQ7 := int32(bits.RotateLeft32(u, -int((24-lz)&31))) & 0x7f
@@ -47,11 +49,13 @@ func ccClzFrac(in int32) (int32, int32) {
 }
 
 func ccLin2log(inLin int32) int32 {
+	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4/wacore/src/voip/mlow/smpl_cc_tables.rs#L33-L37
 	lz, fracQ7 := ccClzFrac(inLin)
 	return ccSmlawb(fracQ7, fracQ7*(128-fracQ7), 179) + ((31 - lz) << 7)
 }
 
 func ccLog2lin(inLogQ7 int32) int32 {
+	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4/wacore/src/voip/mlow/smpl_cc_tables.rs#L39-L57
 	if inLogQ7 < 0 {
 		return 0
 	}
@@ -70,6 +74,7 @@ func ccLog2lin(inLogQ7 int32) int32 {
 }
 
 func ccSigmQ15(inQ5 int32) int32 {
+	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4/wacore/src/voip/mlow/smpl_cc_tables.rs#L59-L79
 	slope := [6]int32{237, 153, 73, 30, 12, 7}
 	pos := [6]int32{16384, 23955, 28861, 31213, 32178, 32548}
 	neg := [6]int32{16384, 8812, 3906, 1554, 589, 219}
@@ -92,6 +97,7 @@ func ccSigmQ15(inQ5 int32) int32 {
 
 // pdfToCmf is smpl_pdf_to_CMF (maxval==-1 path): truncating-int normalize into a u16 CDF.
 func pdfToCmf(pdf []int32) []uint16 {
+	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4/wacore/src/voip/mlow/smpl_cc_tables.rs#L83-L96
 	n := int64(len(pdf))
 	const maxval int64 = 32767
 	var sump int64
@@ -113,6 +119,7 @@ const (
 )
 
 func ccStirling(n int32) int32 {
+	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4/wacore/src/voip/mlow/smpl_cc_tables.rs#L101-L110
 	if n == 0 {
 		return 0
 	}
@@ -123,6 +130,7 @@ func ccStirling(n int32) int32 {
 }
 
 func ccProbSplitFast(k, n int32) int32 {
+	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4/wacore/src/voip/mlow/smpl_cc_tables.rs#L112-L123
 	tmp := ccStirling(n) - ccStirling(k) - ccStirling(n-k) - n*(1<<15)
 	if tmp == 0 {
 		return 1 << 30
@@ -132,6 +140,7 @@ func ccProbSplitFast(k, n int32) int32 {
 }
 
 func ccCreateSplitCmfs() [][]uint16 {
+	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4/wacore/src/voip/mlow/smpl_cc_tables.rs#L125-L137
 	out := make([][]uint16, 0, ccSplitNumTables)
 	for numPulses := int32(1); numPulses <= ccSplitNumTables; numPulses++ {
 		minSplit := numPulses - ccMaxPulsesPerSf*2
@@ -154,6 +163,7 @@ type runlenCmfs struct {
 }
 
 func ccCreateRunlenTable(maxSamples int32) runlenCmfs {
+	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4/wacore/src/voip/mlow/smpl_cc_tables.rs#L141-L185
 	ms := maxSamples
 	cmfs := make([][]uint16, 0, ccMaxPulsesPerSf)
 	for nump := int32(1); nump <= ccMaxPulsesPerSf; nump++ {
@@ -219,6 +229,7 @@ type protoField struct {
 }
 
 func parseProto(b []byte) map[int]protoField {
+	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4/wacore/src/voip/mlow/smpl_tables_blob.rs#L26-L29
 	out := make(map[int]protoField)
 	i := 0
 	readVarint := func() (uint64, bool) {
@@ -265,6 +276,7 @@ func parseProto(b []byte) map[int]protoField {
 
 // decodeZigzagVarints decodes a packed repeated sint32 field.
 func decodeZigzagVarints(b []byte) []int32 {
+	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4/wacore/src/voip/mlow/smpl_cc_tables.rs#L217-L218
 	var out []int32
 	i := 0
 	for i < len(b) {
@@ -285,6 +297,7 @@ func decodeZigzagVarints(b []byte) []int32 {
 }
 
 func loadCcSeed() *ccSeed {
+	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4/wacore/src/voip/mlow/smpl_cc_tables.rs#L331-L337
 	zr, err := zlib.NewReader(bytes.NewReader(ccSeedBlob))
 	if err != nil {
 		panic("mlow: inflate cc seed: " + err.Error())
@@ -313,12 +326,14 @@ func loadCcSeed() *ccSeed {
 
 // ccDcmf is the integer dcmf→cmf (reusing the CELP port), returning a u16 CDF.
 func ccDcmf(dcmf []byte) []uint16 {
+	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4/wacore/src/voip/mlow/smpl_cc_tables.rs#L83-L96
 	c := make([]uint16, len(dcmf)+1)
 	celpDcmfToCmf(dcmf, len(dcmf), c)
 	return c
 }
 
 func ccDcmfChunks(b []byte, step int) [][]uint16 {
+	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4/wacore/src/voip/mlow/smpl_cc_tables.rs#L262-L266
 	out := make([][]uint16, 0, len(b)/step)
 	for i := 0; i+step <= len(b); i += step {
 		out = append(out, ccDcmf(b[i:i+step]))
@@ -379,6 +394,7 @@ var ccTablesInst *CcTables
 
 // LoadCcTables expands the embedded cc seed ROM into the nrgres/gains/LTP/pulse tables once.
 func LoadCcTables() *CcTables {
+	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4/wacore/src/voip/mlow/smpl_cc_tables.rs#L331-L337
 	if ccTablesInst == nil {
 		ccTablesInst = loadCcSeed().build()
 	}
@@ -423,6 +439,7 @@ func (t *CcTables) FcbgainVDelta(prevFilt int32) []uint16 {
 }
 
 func (t *CcTables) gainReconAt(addr uint32) int32 {
+	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4/wacore/src/voip/mlow/smpl_cc_tables.rs#L412-L421
 	off := int(addr - t.gainReconBase)
 	if off >= 0 && off%2 == 0 && off/2 < len(t.gainRecon) {
 		return int32(t.gainRecon[off/2])
@@ -453,3 +470,18 @@ func (t *CcTables) SplitCmf(total int32) []uint16 {
 }
 
 func (t *CcTables) Runlen(oct int32) *runlenCmfs { return &t.runlen[oct-1] }
+
+// cdfWindow returns the n-entry CDF window base[start:start+n], zero-filling any
+// out-of-range entries — the seed-table equivalent of the old mem.CDFAt zero-fill
+// (RangeDecoder.decode_cdf_window in the reference).
+//
+// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4/wacore/src/voip/mlow/rangecoder.rs#L228-L245
+func cdfWindow(base []uint16, start, n int) []uint16 {
+	w := make([]uint16, n)
+	for i := 0; i < n; i++ {
+		if j := start + i; j >= 0 && j < len(base) {
+			w[i] = base[j]
+		}
+	}
+	return w
+}
