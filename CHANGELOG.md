@@ -51,6 +51,15 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
   implemented. KAT `TestPitchEstimatorGroundTruth` (pitchio_ground_truth.json, 48
   active frames): **exact** `laginds`/`blockseg_idx`, pitchcorr max_err 7e-07,
   avg_lag exact, harm within 1.8e-07.
+- **smpl_celp CelpEncoder ported** (celp_enc.go, datasheet datasheets/mlow-celp.md):
+  the closed-loop excitation encoder — perceptual impulse response, ACB/LTP gain
+  search (`calcAcbGain`), greedy + delayed-decision beam FCB pulse search
+  (`smplFcbSearch`/`smplFcbSearchDeldec` with pitch-sharpening cross-terms +
+  signature dedup), gain quant (`calcGainsV`/`celpQuantGainUv`), and the per-subframe
+  orchestrator `EncodeSubframe` returning pulses/indices/reconstructed excitation.
+  Smoke KATs (`encode_{unvoiced,voiced,voiced_fractional_greedy}_runs`) pass: all
+  search paths run and produce correctly-shaped output. Reuses cbAcbgains/acbgN/M.
+  Full bit-correctness arrives with the end-to-end tone round-trip after wiring.
 
 ### mlow/decoder — module #15 KAT-verified (audible milestone) (reference `ed12f359a086b28e807ba236f0977af1000859fe`)
 - Implemented the top-level `MlowDecoder` 1:1 from `decoder.rs`: RED strip → TOC
