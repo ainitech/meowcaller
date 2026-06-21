@@ -7,6 +7,15 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
 
 ## [Unreleased]
 
+### mlow — seed-ROM table architecture (port of the upstream refactor)
+- **pitch tables** now expand from a 2.3 KB seed ROM (`pitch_seed.bin`) instead of
+  the ~33 KB `smpl_pitch_tables.json` blob. `pitch_seed.go` ports `smpl_pitch_seed.rs`:
+  manual protobuf parse → range-decode the blocksegs bitstream (217 blocksegs) →
+  `gen_blocktracks` (187) → integer `dcmf_to_cmf` for the idx/delta-lag/transition
+  CDFs. `LoadPitchTables` now calls `buildPitchTablesFromSeed`. Validated **byte-
+  identical** to the old JSON tables (all 8 `PitchTables` fields DeepEqual); full KAT
+  suite still green. (cc + lsf seeds follow.)
+
 ### mlow — upstream sync (reference `ed12f35..41095d4`): robustness guards
 - Ported the two codec-behavioral fixes from the upstream review commit `543302e`
   (everything else in the 9 new reference commits is non-behavioral — see below):

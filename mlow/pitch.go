@@ -1,10 +1,6 @@
 package mlow
 
-import (
-	_ "embed"
-	"encoding/json"
-	"sync"
-)
+import "sync"
 
 // Pitch / LTP parameters. The decode side (DecodeSmplPitch) reads the LTP gains and
 // pitch lags from the bitstream and is the KAT-verified path; the estimator side
@@ -256,61 +252,18 @@ type PitchTables struct {
 	BlockTransitionCmf [][]uint32
 }
 
-//go:embed smpl_pitch_tables.json
-var smplPitchTablesJSON []byte
-
 var (
 	pitchTablesOnce sync.Once
 	pitchTables     *PitchTables
 )
 
-// LoadPitchTables decodes the embedded pitch tables once and returns the shared set.
-// (The encode side needs only the lag-contour tables; blocktracks/estimator tables
-// are not parsed here.) The asset is the reference's JSON dump verbatim.
+// LoadPitchTables expands the embedded pitch seed ROM (pitch_seed.bin) into the full
+// pitch tables once and returns the shared set. The expansion (range-decode of the
+// blocksegs bitstream + integer DCMF→CDF) is in pitch_seed.go (buildPitchTablesFromSeed)
+// and is bit-identical to the old smpl_pitch_tables.json blob.
 func LoadPitchTables() *PitchTables {
-	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/ed12f359a086b28e807ba236f0977af1000859fe/wacore/src/voip/mlow/smpl_pitch_enc.rs#L87-L92
-	pitchTablesOnce.Do(func() {
-		var pb struct {
-			Blocksegs []struct {
-				Nblocks int   `json:"nblocks"`
-				Blocks  []int `json:"blocks"`
-				Seglens []int `json:"seglens"`
-			} `json:"blocksegs"`
-			Blocktracks []struct {
-				Track       []int   `json:"track"`
-				Meanblock   float32 `json:"meanblock"`
-				Trackdeltas float32 `json:"trackdeltas"`
-			} `json:"blocktracks"`
-			Blocksegs2idx      []int      `json:"blocksegs2idx"`
-			BlocksegIdxCmf     []uint32   `json:"blockseg_idx_CMF"`
-			DeltaLagCmfs       [][]uint32 `json:"delta_lag_CMFs"`
-			BlocksegsIx        [][2]int   `json:"blocksegs_ix"`
-			FirstblockRange    [][2]int   `json:"firstblock_range"`
-			BlockTransitionCmf [][]uint32 `json:"block_transition_CMF"`
-		}
-		if err := json.Unmarshal(smplPitchTablesJSON, &pb); err != nil {
-			panic("mlow: pitch tables JSON: " + err.Error())
-		}
-		t := &PitchTables{
-			Blocksegs2idx:      pb.Blocksegs2idx,
-			BlocksegIdxCmf:     pb.BlocksegIdxCmf,
-			DeltaLagCmfs:       pb.DeltaLagCmfs,
-			BlocksegsIx:        pb.BlocksegsIx,
-			FirstblockRange:    pb.FirstblockRange,
-			BlockTransitionCmf: pb.BlockTransitionCmf,
-		}
-		for _, s := range pb.Blocksegs {
-			t.Blocksegs = append(t.Blocksegs, pitchBlockSeg{Nblocks: s.Nblocks, Blocks: s.Blocks, Seglens: s.Seglens})
-		}
-		for _, bt := range pb.Blocktracks {
-			var tr [NumSubframes]int
-			for i := 0; i < NumSubframes && i < len(bt.Track); i++ {
-				tr[i] = bt.Track[i]
-			}
-			t.Blocktracks = append(t.Blocktracks, pitchBlockTrack{Track: tr, Meanblock: bt.Meanblock, Trackdeltas: bt.Trackdeltas})
-		}
-		pitchTables = t
-	})
+	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4/wacore/src/voip/mlow/smpl_pitch_seed.rs#L111-L158
+	pitchTablesOnce.Do(func() { pitchTables = buildPitchTablesFromSeed() })
 	return pitchTables
 }
 
