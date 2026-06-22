@@ -7,6 +7,22 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
 
 ## [Unreleased]
 
+### relay — module #26 (reference `41095d4e6ba4610e054e9ede3af1d5e88a83faee`)
+- New `relay` package porting `src/voip/transport.rs`: `ClassifyRelayPacket` (the
+  pure first-byte STUN/RTCP/RTP demux) is **KAT-verified** against the reference's
+  inline assertions. The media transport — `ConnectRelayMedia`
+  (UDP→DTLS→SCTP→DataChannel) + `RelayMediaChannel.Send`/`Recv`/`Close` — is a
+  faithful port over **pion** (`pion/dtls/v3`, `pion/sctp`, `pion/datachannel`;
+  adopted by human decision, now direct deps). pion's `dtls.Conn` is a `net.Conn`, so
+  the reference's util-version `Conn` bridge isn't needed. These transport bodies
+  carry `// NOT VALIDATED:` — like the reference (`connect_relay_media` "not
+  exercised in CI"), there is **no vector**; they are validated only against a live
+  relay. Added (beyond the reference's Rust-Drop cleanup) explicit error-path rollback
+  in `ConnectRelayMedia` and a `Close` that tears the stack down in reverse — fixes a
+  CodeRabbit resource-leak finding. CodeRabbit otherwise clean (its pion/dtls
+  CVE-2026-26014 flag is moot: that affects ≤ v3.1.0; we pin v3.1.2). Relay datasheet
+  re-mapped to `src/voip/transport.rs` (was mis-flagged UNMAPPED).
+
 ### signaling/stanza — module #25 KAT-verified (reference `41095d4e6ba4610e054e9ede3af1d5e88a83faee`)
 - New `signaling` package porting `stanza.rs`: the call-control builders
   (`BuildOffer`/`Accept`/`Preaccept`/`Transport`/`RelayLatency`/`Heartbeat`/

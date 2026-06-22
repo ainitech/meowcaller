@@ -44,7 +44,7 @@ confirmed when the module is reached.
 | 23 | ssrc | `rtp` | hkdf | rtp-ssrc.md | `ssrc.rs` | `kats.json` | verified |
 | 24 | warp | `srtp` | stun, e2e_srtp, hbh_srtp | srtp-warp.md | `warp.rs` | `kats.json` | verified |
 | 25 | stanza | `signaling` | whatsmeow/binary | signaling-stanza.md | `stanza.rs` | inline | verified |
-| 26 | relay | `relay` | warp, stun, rtp | relay.md | `src/voip/transport.rs` | (integration) | planned |
+| 26 | relay | `relay` | pion | relay.md | `src/voip/transport.rs` | inline | verified (classify; pion transport NOT VALIDATED — live-relay only) |
 | 27 | session | `meowcaller` | decoder, encoder, sframe, relay, stanza | session.md | `src/voip/session.rs` | (integration) | planned |
 | 28 | call | `meowcaller` | session, stanza | call.md | `src/voip/*`, `stanza.rs` | (integration) | planned |
 

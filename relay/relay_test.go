@@ -5,8 +5,6 @@ import "testing"
 // TestClassifyFirstByte pins every branch of the first-byte relay packet demux
 // against the reference's inline assertions.
 func TestClassifyFirstByte(t *testing.T) {
-	t.Skip("blocked: relay bodies are stubs; enable when implemented")
-
 	cases := []struct {
 		data []byte
 		want RelayPacketKind
