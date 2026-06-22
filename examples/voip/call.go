@@ -13,7 +13,6 @@ import (
 
 	"github.com/purpshell/meowcaller/signaling"
 	"go.mau.fi/whatsmeow"
-	"go.mau.fi/whatsmeow/appstate"
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store/sqlstore"
@@ -42,7 +41,7 @@ func connectClient(ctx context.Context) (*whatsmeow.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load device: %w", err)
 	}
-	client := whatsmeow.NewClient(device, waLog.Stdout("wa", "INFO", true))
+	client := whatsmeow.NewClient(device, waLog.Stdout("wa", "DEBUG", true))
 
 	if client.Store.ID == nil {
 		qr, _ := client.GetQRChannel(ctx)
@@ -59,18 +58,15 @@ func connectClient(ctx context.Context) (*whatsmeow.Client, error) {
 	} else if err := client.Connect(); err != nil {
 		return nil, fmt.Errorf("connect: %w", err)
 	}
-	// Connect()/QR pairing return before the socket handshake is done; wait briefly on
-	// this first connect until it's ready before issuing any usync/call traffic.
-	if !client.WaitForConnection(50 * time.Second) {
-		return nil, errors.New("timed out waiting for whatsmeow connection")
+	// After QR pairing the server sends a 515 and whatsmeow disconnects to reconnect
+	// with the new creds. WaitForConnection bails on that *expected* disconnect, so we
+	// instead wait for the Connected event (dispatched only after authentication) and
+	// the connected+logged-in state to settle across the reconnect.
+	if err := waitUntilReady(ctx, client, 60*time.Second); err != nil {
+		return nil, err
 	}
 	log.Printf("connected as %s", client.Store.GetLID())
 
-	// Sync the critical app-state (push name / settings) so usync, privacy tokens and
-	// contacts behave; tolerate a sync failure rather than abort the session.
-	if err := client.FetchAppState(ctx, appstate.WAPatchCriticalBlock, false, true); err != nil {
-		log.Printf("app-state sync (critical_block): %v — continuing", err)
-	}
 	// A device with no push name can't send presence; give it one, then announce
 	// availability so the server delivers call signaling to us.
 	if client.Store.PushName == "" {
@@ -82,10 +78,40 @@ func connectClient(ctx context.Context) (*whatsmeow.Client, error) {
 	return client, nil
 }
 
+// waitUntilReady blocks until the client is connected and logged in, tolerating the
+// expected post-pair (515) disconnect+reconnect. It keys off events.Connected, which
+// whatsmeow dispatches only after successful authentication, so it returns once the
+// reconnect-with-creds has fully settled rather than aborting on the planned drop.
+func waitUntilReady(ctx context.Context, client *whatsmeow.Client, timeout time.Duration) error {
+	ready := make(chan struct{}, 8)
+	id := client.AddEventHandler(func(evt any) {
+		if _, ok := evt.(*events.Connected); ok {
+			select {
+			case ready <- struct{}{}:
+			default:
+			}
+		}
+	})
+	defer client.RemoveEventHandler(id)
+
+	deadline := time.After(timeout)
+	for !(client.IsConnected() && client.IsLoggedIn()) {
+		select {
+		case <-ready:
+		case <-deadline:
+			return errors.New("timed out waiting for whatsmeow connection")
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
 // resolvePeerLID turns a CLI target (phone number, phone JID, or @lid JID) into the
-// peer's LID — the address the call's E2E keys and SSRCs derive from. This is the
-// "resolve the LID before the call" step; a phone JID is mapped via the LID store,
-// seeded by a usync query if not cached.
+// peer's LID — the address the call's E2E keys and SSRCs derive from. A LID is used
+// directly; a phone JID is mapped via the LID store, seeded by a usync query if not
+// cached.
+//
 // parseCallTarget turns a CLI target into a JID. A string with '@' is a real JID (a
 // LID to call directly, or a phone JID to resolve); a bare string is a phone number.
 // ParseJID does NOT error on a missing '@' (it puts the whole string in the server
