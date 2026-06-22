@@ -7,6 +7,18 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
 
 ## [Unreleased]
 
+### rtp/ssrc — module #23 KAT-verified (reference `41095d4e6ba4610e054e9ede3af1d5e88a83faee`)
+- `rtp` package gains SSRC derivation + participant-LID helpers:
+  `DeriveWasmParticipantSsrc` (HKDF-SHA256 with salt=slot-word LE32, ikm=callId,
+  info=lid → LE u32) via the #17 `util.HKDFSHA256`, `DeriveWasmRelayStreamSsrcs`
+  (all 9 slots), `FormatE2ESrtpParticipantID` (delegates to the extracted
+  `util.FormatParticipantID`), and `E2EParticipantIDVariants` (deduped recv-path
+  LID variants). Per the standing convention the derivation returns
+  `(uint32, error)` — the error is impossible for 4-byte output but bubbles rather
+  than panics. KAT (`kats.json` voip_crypto ssrc_slot0/1 + the participant-id format
+  rules + a variants check, synthetic — no PII) passes. CodeRabbit: clean.
+  **KAT-verified.**
+
 ### rtp — module #22 KAT-verified (reference `41095d4e6ba4610e054e9ede3af1d5e88a83faee`)
 - New `rtp` package porting `rtp.rs` + `rtcp.rs`: the WhatsApp RTP header (16-byte
   speech / 20-byte `0xdebe` DTX) encode/parse, the Opus payload classifiers

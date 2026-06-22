@@ -41,7 +41,7 @@ confirmed when the module is reached.
 | 20 | sframe | `srtp` | hkdf | srtp-sframe.md | `sframe.rs` | `kats.json` | verified (sframe core; DeriveWarpAuthKey scaffolded for #24) |
 | 21 | stun | `stun` | — | stun.md | `stun.rs` | `kats.json` | verified |
 | 22 | rtp | `rtp` | warp | rtp.md | `rtp.rs`, `rtcp.rs` | `kats.json` | verified |
-| 23 | ssrc | `rtp` | rtp | rtp-ssrc.md | `ssrc.rs` | inline | planned |
+| 23 | ssrc | `rtp` | hkdf | rtp-ssrc.md | `ssrc.rs` | `kats.json` | verified |
 | 24 | warp | `srtp` | stun, e2e_srtp, hbh_srtp | srtp-warp.md | `warp.rs` | inline | scaffolded (piggyback only; full module pending) |
 | 25 | stanza | `signaling` | — | signaling-stanza.md | `stanza.rs` | inline | planned |
 | 26 | relay | `relay` | warp, stun, rtp | relay.md | `src/voip/transport.rs` | (integration) | planned |

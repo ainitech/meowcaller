@@ -33,8 +33,6 @@ func loadSsrcKat(t *testing.T) ssrcKat {
 
 // TestSsrcMatchesKAT checks the per-slot SSRC derivation against kats.json.
 func TestSsrcMatchesKAT(t *testing.T) {
-	t.Skip("blocked: ssrc bodies are stubs; enable when implemented")
-
 	k := loadSsrcKat(t)
 	got0, err := DeriveWasmParticipantSsrc(k.Inputs.CallID, k.Inputs.PeerLid, 0)
 	if err != nil {
@@ -54,8 +52,6 @@ func TestSsrcMatchesKAT(t *testing.T) {
 
 // TestFormatParticipantIDRules checks the device-suffix rules.
 func TestFormatParticipantIDRules(t *testing.T) {
-	t.Skip("blocked: ssrc bodies are stubs; enable when implemented")
-
 	cases := map[string]string{
 		"12345@lid":            "12345:0@lid",
 		"12345:6@lid":          "12345:6@lid",
@@ -70,8 +66,6 @@ func TestFormatParticipantIDRules(t *testing.T) {
 
 // TestE2EParticipantIDVariants checks the deduplicated recv-path LID variants.
 func TestE2EParticipantIDVariants(t *testing.T) {
-	t.Skip("blocked: ssrc bodies are stubs; enable when implemented")
-
 	got := E2EParticipantIDVariants("12345:6@lid")
 	want := []string{"12345:6@lid", "12345:0@lid", "12345@lid"}
 	if !reflect.DeepEqual(got, want) {
