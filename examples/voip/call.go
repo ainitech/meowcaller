@@ -51,9 +51,9 @@ func connectClient(ctx context.Context) (*whatsmeow.Client, error) {
 	} else if err := client.Connect(); err != nil {
 		return nil, fmt.Errorf("connect: %w", err)
 	}
-	// Connect()/QR pairing return before the socket handshake is done; wait until the
-	// connection is actually ready before issuing any usync/call traffic.
-	if !client.WaitForConnection(30 * time.Second) {
+	// Connect()/QR pairing return before the socket handshake is done; wait briefly on
+	// this first connect until it's ready before issuing any usync/call traffic.
+	if !client.WaitForConnection(5 * time.Second) {
 		return nil, errors.New("timed out waiting for whatsmeow connection")
 	}
 	log.Printf("connected as %s", client.Store.GetLID())
