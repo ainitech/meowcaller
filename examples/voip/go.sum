@@ -38,8 +38,6 @@ github.com/petermattis/goid v0.0.0-20260330135022-df67b199bc81 h1:WDsQxOJDy0N1VR
 github.com/petermattis/goid v0.0.0-20260330135022-df67b199bc81/go.mod h1:pxMtw7cyUw6B2bRH0ZBANSPg+AoSud1I1iyJHI69jH4=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
-github.com/purpshell/wamsdk v0.0.0-20260324193600-a75cf081c1e6 h1:fjUr1q6RZO+D7U5wSE27//EmXpfrQRkXaTjimPduuko=
-github.com/purpshell/wamsdk v0.0.0-20260324193600-a75cf081c1e6/go.mod h1:q1dodAi+HguvMroJyN4lvHi+1fmvVPsWoGEfHMuclGA=
 github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec h1:W09IVJc94icq4NjY3clb7Lk8O1qJ8BdBEF8z0ibU0rE=
 github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec/go.mod h1:qqbHyh8v60DhA7CoWK5oRCqLrMHRGoxYCSS9EjAz6Eo=
 github.com/rs/zerolog v1.35.1 h1:m7xQeoiLIiV0BCEY4Hs+j2NG4Gp2o2KPKmhnnLiazKI=
@@ -54,8 +52,6 @@ go.mau.fi/libsignal v0.2.2 h1:QV+XdzQkm3x3aSG7FcqfGSZuFXz83pRZPBFaPygHbOU=
 go.mau.fi/libsignal v0.2.2/go.mod h1:CRlIQg2J8uYTfDFvNoO8/KcZjs5cey0vbc6oj/bssY0=
 go.mau.fi/util v0.9.9 h1:ujDeXCo07HBor5oQLyO1tHklupmqVmPgasc53d7q/NE=
 go.mau.fi/util v0.9.9/go.mod h1:pqt4Vcrt+5gcH/CgrHZg11qSx+b34o6mknGzOEA6waY=
-go.mau.fi/whatsmeow v0.0.0-20260305215846-fc65416c22c4 h1:FGA3NtCVNeCJ+C+KBg1pODsrfxC/trM3RHFWIeY7y4c=
-go.mau.fi/whatsmeow v0.0.0-20260305215846-fc65416c22c4/go.mod h1:mXCRFyPEPn4jqWz6Afirn8vY7DpHCPnlKq6I2cWwFHM=
 go.mau.fi/whatsmeow v0.0.0-20260609091626-4e622162b959 h1:5MpMyxG2lGLgnN0zKfD6fnDBvyGXoOlruLK34tV281w=
 go.mau.fi/whatsmeow v0.0.0-20260609091626-4e622162b959/go.mod h1:9hto2r5yVE5yyNTRrZErKNSflGBKxIplUVXAD3EJFDE=
 golang.org/x/crypto v0.52.0 h1:RMs7fP2rXdep0CftQlK8Uf+kibLm7qkCcradZWYz988=

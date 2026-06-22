@@ -47,17 +47,15 @@ recv-side ROC tracker — all on real audio, no network.
 `call` and `autoaccept` drive the full signaling path against a real account:
 
 1. **Login** — whatsmeow session in a local `wa-voip.db` (QR pairing on first run).
-2. **WAM protection** — WhatsApp-metrics (telemetry) events are reported via
-   `wamsdk` + `meowmetrics` while connected, so the session looks like a real client.
-3. **LID resolution** — a phone target is mapped to the peer's `@lid` via the LID
+2. **LID resolution** — a phone target is mapped to the peer's `@lid` via the LID
    store, seeded by a usync query when not cached. The call's E2E keys and SSRCs
    derive from the LID, so this happens *before* the offer.
-4. **Device discovery** — `GetUserDevices` lists the peer's devices.
-5. **callKey encryption** — the 32-byte callKey is wrapped as the Signal message
+3. **Device discovery** — `GetUserDevices` lists the peer's devices.
+4. **callKey encryption** — the 32-byte callKey is wrapped as the Signal message
    `Message{Call{CallKey}}` and encrypted to each device's Signal session
    (`EncryptMessageForDevice`, fetching a pre-key bundle when there's no session
    yet). `autoaccept` does the reverse: it decrypts the inbound offer's `<enc>`.
-6. **Offer / answer** — `signaling.BuildOffer` (and `BuildPreaccept`/`BuildAccept`
+5. **Offer / answer** — `signaling.BuildOffer` (and `BuildPreaccept`/`BuildAccept`
    for answering) assemble the call-control stanzas with the load-bearing child order.
 
 ## What's left for a live media call
@@ -73,5 +71,4 @@ resolution, callKey encryption and codec are all in place.
 - Requires cgo (a C compiler) for miniaudio. The Signal/WhatsApp pieces use
   whatsmeow's low-level `DangerousInternals` (the only entry point for raw call
   nodes and per-device encryption) — expected for call signaling.
-- `wamsdk` is a private module; you need access to build the `call`/`listen`/
-  `autoaccept` commands. `loopback` needs only `malgo` + the library.
+- All dependencies are public; `loopback` needs only `malgo` + the library.

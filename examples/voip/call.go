@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/purpshell/meowcaller/signaling"
-	"github.com/purpshell/wamsdk/meowmetrics"
 	"go.mau.fi/whatsmeow"
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -23,22 +23,9 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// waSession bundles a connected whatsmeow client with the WAM metrics reporter.
-type waSession struct {
-	client  *whatsmeow.Client
-	metrics *meowmetrics.Client
-}
-
-func (s *waSession) Close() {
-	if s.metrics != nil {
-		s.metrics.Close()
-	}
-	s.client.Disconnect()
-}
-
-// connectSession opens the local store, logs in (QR on first run), starts WAM
-// metrics, and returns a connected session.
-func connectSession(ctx context.Context) (*waSession, error) {
+// connectClient opens the local store and logs in (QR on first run), returning a
+// connected client.
+func connectClient(ctx context.Context) (*whatsmeow.Client, error) {
 	container, err := sqlstore.New(ctx, "sqlite", "file:wa-voip.db?_pragma=foreign_keys(1)", waLog.Stdout("db", "WARN", true))
 	if err != nil {
 		return nil, fmt.Errorf("open store: %w", err)
@@ -48,7 +35,6 @@ func connectSession(ctx context.Context) (*waSession, error) {
 		return nil, fmt.Errorf("load device: %w", err)
 	}
 	client := whatsmeow.NewClient(device, waLog.Stdout("wa", "INFO", true))
-	metrics, wamOnConnect := setupWAM(client)
 
 	if client.Store.ID == nil {
 		qr, _ := client.GetQRChannel(ctx)
@@ -65,8 +51,13 @@ func connectSession(ctx context.Context) (*waSession, error) {
 	} else if err := client.Connect(); err != nil {
 		return nil, fmt.Errorf("connect: %w", err)
 	}
-	wamOnConnect() // WAM (WhatsApp metrics) handshake — look like a real client
-	return &waSession{client: client, metrics: metrics}, nil
+	// Connect()/QR pairing return before the socket handshake is done; wait until the
+	// connection is actually ready before issuing any usync/call traffic.
+	if !client.WaitForConnection(30 * time.Second) {
+		return nil, errors.New("timed out waiting for whatsmeow connection")
+	}
+	log.Printf("connected as %s", client.Store.GetLID())
+	return client, nil
 }
 
 // resolvePeerLID turns a CLI target (phone number, phone JID, or @lid JID) into the
@@ -128,12 +119,11 @@ func encryptCallKeyForDevice(ctx context.Context, cli *whatsmeow.Client, dev typ
 // runCall connects, resolves the peer LID, discovers devices, encrypts a fresh
 // callKey per device, and sends the <call><offer>.
 func runCall(ctx context.Context, target string) error {
-	sess, err := connectSession(ctx)
+	cli, err := connectClient(ctx)
 	if err != nil {
 		return err
 	}
-	defer sess.Close()
-	cli := sess.client
+	defer cli.Disconnect()
 
 	self := cli.Store.GetLID()
 	if self.IsEmpty() {
@@ -183,12 +173,11 @@ func runCall(ctx context.Context, target string) error {
 // runListen connects and prints incoming call signaling. With autoAccept, it
 // decrypts the offer's callKey and replies preaccept + accept.
 func runListen(ctx context.Context, autoAccept bool) error {
-	sess, err := connectSession(ctx)
+	cli, err := connectClient(ctx)
 	if err != nil {
 		return err
 	}
-	defer sess.Close()
-	cli := sess.client
+	defer cli.Disconnect()
 
 	cli.AddEventHandler(func(evt any) {
 		switch e := evt.(type) {

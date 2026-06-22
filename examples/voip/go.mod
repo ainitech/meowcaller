@@ -5,8 +5,7 @@ go 1.25.0
 require (
 	github.com/gen2brain/malgo v0.11.23
 	github.com/purpshell/meowcaller v0.0.0
-	github.com/purpshell/wamsdk v0.0.0-20260324193600-a75cf081c1e6
-	go.mau.fi/whatsmeow v0.0.0-20260305215846-fc65416c22c4
+	go.mau.fi/whatsmeow v0.0.0-20260609091626-4e622162b959
 	google.golang.org/protobuf v1.36.11
 	modernc.org/sqlite v1.53.0
 )
