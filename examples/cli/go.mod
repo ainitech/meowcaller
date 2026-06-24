@@ -3,8 +3,8 @@ module github.com/purpshell/meowcaller/examples/cli
 go 1.25.0
 
 require (
-	github.com/gen2brain/malgo v0.11.23
 	github.com/purpshell/meowcaller v0.0.0
+	github.com/purpshell/meowcaller/audio/malgo v0.0.0
 	github.com/rs/zerolog v1.35.1
 	go.mau.fi/whatsmeow v0.0.0-20260609091626-4e622162b959
 	google.golang.org/protobuf v1.36.11
@@ -17,7 +17,9 @@ require (
 	github.com/coder/websocket v1.8.14 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/elliotchance/orderedmap/v3 v3.1.0 // indirect
+	github.com/gen2brain/malgo v0.11.23 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/hajimehoshi/go-mp3 v0.3.4 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
@@ -25,6 +27,7 @@ require (
 	github.com/pion/datachannel v1.6.0 // indirect
 	github.com/pion/dtls/v3 v3.1.2 // indirect
 	github.com/pion/logging v0.2.4 // indirect
+	github.com/pion/opus v0.1.0 // indirect
 	github.com/pion/randutil v0.1.0 // indirect
 	github.com/pion/sctp v1.9.4 // indirect
 	github.com/pion/transport/v4 v4.0.1 // indirect
@@ -44,3 +47,5 @@ require (
 )
 
 replace github.com/purpshell/meowcaller => ../../
+
+replace github.com/purpshell/meowcaller/audio/malgo => ../../audio/malgo

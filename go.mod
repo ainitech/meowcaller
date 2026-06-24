@@ -3,9 +3,11 @@ module github.com/purpshell/meowcaller
 go 1.25.0
 
 require (
+	github.com/hajimehoshi/go-mp3 v0.3.4
 	github.com/pion/datachannel v1.6.0
 	github.com/pion/dtls/v3 v3.1.2
 	github.com/pion/logging v0.2.4
+	github.com/pion/opus v0.1.0
 	github.com/pion/sctp v1.9.4
 	github.com/rs/zerolog v1.35.1
 	go.mau.fi/whatsmeow v0.0.0-20260609091626-4e622162b959

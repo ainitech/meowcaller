@@ -7,6 +7,23 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
 
 ## [Unreleased]
 
+### meowcaller — implement the managed calling API; collapse the CLI example
+- Filled the managed engine (`engine.go` + `engine_media.go`) by lifting the entire
+  calling orchestration out of `examples/cli` into the library: signaling (offer /
+  preaccept / accept-deferred-until-`mute_v2` / relaylatency election / ack-relay /
+  terminate), the `<ack>`/`<call>` node interception, and the per-frame relay media
+  loop — driven by the `Call`'s `Player` (outbound) and sink (inbound) instead of
+  mic/speaker. The hard-won relay recipe is preserved exactly (consent ping at t+0
+  before any RTP, 1 Hz allocate+ping keepalive, no STUN binding-requests; the live
+  path is `NOT VALIDATED`). Added the pure-Go audio decoders (`WAVFile`/`MP3File` via
+  go-mp3 / `OpusFile` via pion/opus, with downmix+resample) and the `WAVRecorder`
+  sink, plus a new opt-in cgo module `meowcaller/audio/malgo` (`Mic`/`Speaker`) so the
+  core stays cgo-free. **`examples/cli` collapsed to a single `main.go`** (call /
+  play / listen / autoaccept) — the loopback mode and all hand-rolled orchestration
+  removed. All three modules build/vet clean; KATs green. Preaccept is deferred to
+  `Call.Answer()` (the integrator decides Answer vs Reject); inbound calling still
+  uses whatsmeow `DangerousInternals` pending its promotion to stable upstream API.
+
 ### meowcaller — scaffold the managed calling API (Client/Call/Player/audio)
 - Began lifting the entire calling orchestration out of `examples/cli` into a managed,
   high-level library API so consumers write a handful of lines instead of hand-rolling
