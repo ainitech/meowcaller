@@ -6,12 +6,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/purpshell/meowcaller/signaling"
+	"github.com/rs/zerolog"
 	"go.mau.fi/whatsmeow"
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/proto/waCompanionReg"
@@ -35,6 +35,7 @@ const meowcallerDBPath = "meowcaller.db"
 // client. busy_timeout absorbs brief lock contention so a busy session doesn't
 // error out with "database is locked".
 func connectClient(ctx context.Context) (*whatsmeow.Client, error) {
+	log := zerolog.Ctx(ctx)
 	// Present as a Google Chrome web client. The connection already advertises the
 	// WEB platform; these companion props make the linked-device entry read
 	// "Google Chrome (Mac OS)" instead of the default. DeviceProps is read at
@@ -42,7 +43,7 @@ func connectClient(ctx context.Context) (*whatsmeow.Client, error) {
 	store.DeviceProps.Os = proto.String("Mac OS")
 	store.DeviceProps.PlatformType = waCompanionReg.DeviceProps_CHROME.Enum()
 
-	container, err := sqlstore.New(ctx, "sqlite", "file:wa-voip.db?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)", waLog.Stdout("db", "WARN", true))
+	container, err := sqlstore.New(ctx, "sqlite", "file:wa-voip.db?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)", waLog.Zerolog(*zerolog.Ctx(ctx)).Sub("db"))
 	if err != nil {
 		return nil, fmt.Errorf("open store: %w", err)
 	}
@@ -50,7 +51,7 @@ func connectClient(ctx context.Context) (*whatsmeow.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load device: %w", err)
 	}
-	client := whatsmeow.NewClient(device, waLog.Stdout("wa", "DEBUG", true))
+	client := whatsmeow.NewClient(device, waLog.Zerolog(*zerolog.Ctx(ctx)).Sub("wa"))
 	// whatsmeow drops <ack> nodes; the outbound call's relay allocation rides in
 	// <ack class="call">. Install the interceptor before Connect.
 	installCallAckHook(client)
@@ -62,9 +63,9 @@ func connectClient(ctx context.Context) (*whatsmeow.Client, error) {
 		}
 		for evt := range qr {
 			if evt.Event == "code" {
-				log.Printf("scan in WhatsApp ▸ Linked devices (valid %.0fs):\n%s", evt.Timeout.Seconds(), evt.Code)
+				log.Info().Int("valid_s", int(evt.Timeout.Seconds())).Str("qr_code", evt.Code).Msg("scan in WhatsApp > Linked devices")
 			} else {
-				log.Printf("login: %s", evt.Event)
+				log.Info().Str("event", evt.Event).Msg("login event")
 			}
 		}
 	} else if err := client.Connect(); err != nil {
@@ -77,7 +78,7 @@ func connectClient(ctx context.Context) (*whatsmeow.Client, error) {
 	if err := waitUntilReady(ctx, client, 60*time.Second); err != nil {
 		return nil, err
 	}
-	log.Printf("connected as %s", client.Store.GetLID())
+	log.Info().Str("self_lid", client.Store.GetLID().String()).Msg("connected")
 
 	// A device with no push name can't send presence; give it one, then announce
 	// availability so the server delivers call signaling to us.
@@ -85,7 +86,7 @@ func connectClient(ctx context.Context) (*whatsmeow.Client, error) {
 		client.Store.PushName = "meowcaller"
 	}
 	if err := client.SendPresence(ctx, types.PresenceAvailable); err != nil {
-		log.Printf("send presence: %v — continuing", err)
+		log.Warn().Err(err).Msg("send presence failed; continuing")
 	}
 	return client, nil
 }
@@ -205,6 +206,7 @@ func encryptCallKeyForDevice(ctx context.Context, cli *whatsmeow.Client, dev typ
 // runCall connects, resolves the peer LID, discovers devices, encrypts a fresh
 // callKey per device, and sends the <call><offer>.
 func runCall(ctx context.Context, target string) error {
+	log := zerolog.Ctx(ctx)
 	cli, err := connectClient(ctx)
 	if err != nil {
 		return err
@@ -225,13 +227,13 @@ func runCall(ctx context.Context, target string) error {
 	if err != nil {
 		return err
 	}
-	log.Printf("resolved peer LID: %s (self %s)", peerLID, self)
+	log.Info().Str("peer_lid", peerLID.String()).Str("self_lid", self.String()).Msg("resolved peer LID")
 
 	devices, err := cli.GetUserDevices(ctx, []types.JID{peerLID})
 	if err != nil {
 		return fmt.Errorf("device discovery: %w", err)
 	}
-	log.Printf("peer has %d device(s): %v", len(devices), devices)
+	log.Info().Int("device_count", len(devices)).Str("peer_lid", peerLID.String()).Msg("peer device count")
 	if len(devices) == 0 {
 		return fmt.Errorf("peer %s has no devices (unreachable / not on WhatsApp); the server would reject the offer with 404", peerLID)
 	}
@@ -266,9 +268,9 @@ func runCall(ctx context.Context, target string) error {
 	var privacyToken []byte
 	if pt, err := cli.Store.PrivacyTokens.GetPrivacyToken(ctx, peerLID); err == nil && pt != nil {
 		privacyToken = pt.Token
-		log.Printf("attaching privacy token (%d bytes) for %s", len(privacyToken), peerLID)
+		log.Info().Int("token_bytes", len(privacyToken)).Str("peer_lid", peerLID.String()).Msg("attaching privacy token")
 	} else {
-		log.Printf("no privacy token for %s — the offer may be rejected if the peer requires one", peerLID)
+		log.Info().Str("peer_lid", peerLID.String()).Msg("no privacy token; offer may be rejected if the peer requires one")
 	}
 
 	callID := newCallID()
@@ -301,7 +303,7 @@ func runCall(ctx context.Context, target string) error {
 		case *events.CallTransport:
 			coord.onRelay(e.CallID, e.Data)
 		case *events.CallTerminate:
-			log.Printf("call %s terminated: %s", e.CallID, e.Reason)
+			log.Info().Str("call_id", e.CallID).Str("reason", e.Reason).Msg("call terminated")
 			coord.onTerminate(e.CallID)
 		}
 	})
@@ -309,7 +311,7 @@ func runCall(ctx context.Context, target string) error {
 	if err := cli.DangerousInternals().SendNode(ctx, offer); err != nil {
 		return fmt.Errorf("send offer: %w", err)
 	}
-	log.Printf("📞 offer sent (call-id %s); media starts when the relay endpoint arrives. Ctrl+C to stop.", callID)
+	log.Info().Str("call_id", callID).Msg("offer sent; media starts when the relay endpoint arrives. Ctrl+C to stop")
 	<-ctx.Done()
 	return nil
 }
@@ -335,12 +337,13 @@ type coordinator struct {
 	ctx   context.Context
 	cli   *whatsmeow.Client
 	store *meowStore
+	log   zerolog.Logger
 	mu    sync.Mutex
 	cmap  map[string]*callMedia
 }
 
 func newCoordinator(ctx context.Context, cli *whatsmeow.Client, store *meowStore) *coordinator {
-	return &coordinator{ctx: ctx, cli: cli, store: store, cmap: map[string]*callMedia{}}
+	return &coordinator{ctx: ctx, cli: cli, store: store, log: *zerolog.Ctx(ctx), cmap: map[string]*callMedia{}}
 }
 
 // persist writes a call's current meowcaller-side state to the meowcaller store.
@@ -364,7 +367,7 @@ func (c *coordinator) persist(callID, phase string, m *callMedia) {
 		}
 	}
 	if err := c.store.SaveCall(c.ctx, rec); err != nil {
-		log.Printf("meowcaller-db: save call %s: %v", callID, err)
+		c.log.Warn().Err(err).Str("call_id", callID).Msg("meowcaller-db: save call failed")
 	}
 }
 
@@ -387,16 +390,16 @@ func (c *coordinator) onOffer(e *events.CallOffer) {
 	// accept) just earns an "accept error 500". Ack-only; do not process.
 	oag := e.Data.AttrGetter()
 	if oag.OptionalString("is_call_ended") == "1" || oag.OptionalString("terminate_reason") != "" {
-		log.Printf("↩ ignoring already-ended offer %s (reason=%q) — not a live call", e.CallID, oag.OptionalString("terminate_reason"))
+		c.log.Warn().Str("call_id", e.CallID).Str("reason", oag.OptionalString("terminate_reason")).Msg("ignoring already-ended offer; not a live call")
 		return
 	}
 
 	callKey, err := decryptInboundCallKey(c.ctx, c.cli, e)
 	if err != nil {
-		log.Printf("decrypt callKey for %s: %v", e.CallID, err)
+		c.log.Warn().Err(err).Str("call_id", e.CallID).Msg("decrypt callKey failed")
 		return
 	}
-	log.Printf("🔑 decrypted callKey (%d bytes) for %s", len(callKey), e.CallID)
+	c.log.Info().Int("key_bytes", len(callKey)).Str("call_id", e.CallID).Msg("decrypted callKey")
 
 	// Preaccept: single rate 16000 + encopt + capability (0105f709e4bb13), NO metadata —
 	// built inline to match the captured WA-Web preaccept body exactly (BuildPreaccept uses
@@ -415,10 +418,10 @@ func (c *coordinator) onOffer(e *events.CallOffer) {
 		}},
 	}
 	if err := c.cli.DangerousInternals().SendNode(c.ctx, pre); err != nil {
-		log.Printf("send preaccept: %v", err)
+		c.log.Error().Err(err).Str("call_id", e.CallID).Msg("send preaccept failed")
 		return
 	}
-	log.Printf("⏳ preaccepted %s — accept deferred until mute_v2", e.CallID)
+	c.log.Info().Str("call_id", e.CallID).Msg("preaccepted; accept deferred until mute_v2")
 
 	peer := e.CallCreator
 	if peer.IsEmpty() {
@@ -458,10 +461,10 @@ func (c *coordinator) sendAccept(callID string, to, creator types.JID) {
 	})
 	accept.Attrs["id"] = c.cli.DangerousInternals().GenerateRequestID()
 	if err := c.cli.DangerousInternals().SendNode(c.ctx, accept); err != nil {
-		log.Printf("send accept: %v", err)
+		c.log.Error().Err(err).Str("call_id", callID).Msg("send accept failed")
 		return
 	}
-	log.Printf("✅ accepted %s (after mute_v2)", callID)
+	c.log.Info().Str("call_id", callID).Msg("accepted (after mute_v2)")
 	if c.store != nil {
 		_ = c.store.SetPhase(c.ctx, callID, "accepted")
 	}
@@ -498,7 +501,7 @@ func (c *coordinator) onCallRaw(callNode *waBinary.Node) {
 		if callID == "" {
 			return
 		}
-		log.Printf("🔇 mute_v2 received for %s — sending deferred accept", callID)
+		c.log.Info().Str("call_id", callID).Msg("mute_v2 received; sending deferred accept")
 		c.sendAccept(callID, callNode.AttrGetter().JID("from"), mv.JID("call-creator"))
 	}
 }
@@ -547,10 +550,10 @@ func (c *coordinator) sendOfferReceipt(callNode *waBinary.Node) {
 		}},
 	}
 	if err := c.cli.DangerousInternals().SendNode(c.ctx, receipt); err != nil {
-		log.Printf("send offer receipt: %v", err)
+		c.log.Error().Err(err).Str("call_id", oag.String("call-id")).Msg("send offer receipt failed")
 		return
 	}
-	log.Printf("📨 sent offer receipt for %s", oag.String("call-id"))
+	c.log.Info().Str("call_id", oag.String("call-id")).Msg("sent offer receipt")
 }
 
 // onRelayLatency answers the caller's relaylatency probes (the callee's half of the relay
@@ -580,7 +583,7 @@ func (c *coordinator) onRelayLatency(e *events.CallRelayLatency) {
 		})
 	}
 	if sent := c.sendRelayLatency(e.CallID, e.From, e.CallCreator, probes); sent > 0 {
-		log.Printf("↩ answered %d relaylatency probe(s) for %s", sent, e.CallID)
+		c.log.Info().Int("packet_count", sent).Str("call_id", e.CallID).Msg("answered relaylatency probes")
 	}
 }
 
@@ -607,7 +610,7 @@ func (c *coordinator) sendRelayLatency(callID string, to, creator types.JID, pro
 		})
 		resp.Attrs["id"] = c.cli.GenerateMessageID()
 		if err := c.cli.DangerousInternals().SendNode(c.ctx, resp); err != nil {
-			log.Printf("send relaylatency: %v", err)
+			c.log.Error().Err(err).Str("call_id", callID).Msg("send relaylatency failed")
 			return sent
 		}
 		sent++
@@ -628,7 +631,7 @@ func (c *coordinator) onCallAck(ack *waBinary.Node) {
 		if en := findChild(ack, "error"); en != nil {
 			callID = en.AttrGetter().String("call-id")
 		}
-		log.Printf("⛔ call %s rejected by server: %s error %s", callID, ackType, errCode)
+		c.log.Warn().Str("call_id", callID).Str("ack_type", ackType).Str("error_code", errCode).Msg("call rejected by server")
 		c.stopMedia(callID)
 		if c.store != nil && callID != "" {
 			_ = c.store.SetPhase(c.ctx, callID, "failed:"+errCode)
@@ -643,7 +646,7 @@ func (c *coordinator) onCallAck(ack *waBinary.Node) {
 	if callID == "" {
 		return
 	}
-	log.Printf("📥 relay allocation arrived in call ack for %s", callID)
+	c.log.Info().Str("call_id", callID).Msg("relay allocation arrived in call ack")
 	c.onRelay(callID, ack)
 }
 
@@ -654,7 +657,7 @@ func (c *coordinator) onTerminate(callID string) {
 		return
 	}
 	if err := c.store.SetPhase(c.ctx, callID, "terminated"); err != nil {
-		log.Printf("meowcaller-db: terminate %s: %v", callID, err)
+		c.log.Warn().Err(err).Str("call_id", callID).Msg("meowcaller-db: terminate failed")
 	}
 }
 
@@ -667,10 +670,10 @@ func (c *coordinator) maybeStart(callID string, m *callMedia) {
 	mctx, cancel := context.WithCancel(c.ctx)
 	m.cancel = cancel
 	c.persist(callID, "media", m)
-	log.Printf("▶ starting media for %s", callID)
+	c.log.Info().Str("call_id", callID).Msg("starting media")
 	go func() {
 		if err := runMedia(mctx, callID, m.callKey, m.selfLID, m.peerLID, m.relay); err != nil {
-			log.Printf("media for %s ended: %v", callID, err)
+			c.log.Warn().Err(err).Str("call_id", callID).Msg("media ended")
 		}
 	}()
 }
@@ -687,6 +690,7 @@ func (c *coordinator) stopMedia(callID string) {
 
 // runListen connects and, with autoAccept, answers incoming calls and pipes media.
 func runListen(ctx context.Context, autoAccept bool) error {
+	log := zerolog.Ctx(ctx)
 	cli, err := connectClient(ctx)
 	if err != nil {
 		return err
@@ -699,7 +703,7 @@ func runListen(ctx context.Context, autoAccept bool) error {
 	}
 	defer store.Close()
 	if n, err := store.CountCalls(ctx); err == nil {
-		log.Printf("meowcaller store: %s (%d call(s) recorded), separate from whatsmeow's wa-voip.db", meowcallerDBPath, n)
+		log.Info().Str("path", meowcallerDBPath).Int("call_count", n).Msg("meowcaller store loaded, separate from whatsmeow's wa-voip.db")
 	}
 	coord := newCoordinator(ctx, cli, store)
 	setCallAckHandler(coord.onCallAck)
@@ -708,7 +712,7 @@ func runListen(ctx context.Context, autoAccept bool) error {
 	cli.AddEventHandler(func(evt any) {
 		switch e := evt.(type) {
 		case *events.CallOffer:
-			log.Printf("📞 incoming call %s from %s (auto-accept=%v)", e.CallID, e.From, autoAccept)
+			log.Info().Str("call_id", e.CallID).Str("peer_lid", e.From.String()).Bool("auto_accept", autoAccept).Msg("incoming call")
 			if autoAccept {
 				coord.onOffer(e)
 			}
@@ -722,11 +726,11 @@ func runListen(ctx context.Context, autoAccept bool) error {
 				coord.onRelay(e.CallID, e.Data)
 			}
 		case *events.CallTerminate:
-			log.Printf("call %s terminated: %s", e.CallID, e.Reason)
+			log.Info().Str("call_id", e.CallID).Str("reason", e.Reason).Msg("call terminated")
 			coord.onTerminate(e.CallID)
 		}
 	})
-	log.Printf("listening for calls (auto-accept=%v). Ctrl+C to stop.", autoAccept)
+	log.Info().Bool("auto_accept", autoAccept).Msg("listening for calls. Ctrl+C to stop")
 	<-ctx.Done()
 	return nil
 }

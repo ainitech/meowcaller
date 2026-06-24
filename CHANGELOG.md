@@ -7,6 +7,18 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
 
 ## [Unreleased]
 
+### examples/voip — migrate CLI logging to structured zerolog (no emoji)
+- Replaced the stdlib `log`/`Printf` calls (and all decorative emoji) across
+  `main.go`, `call.go`, `media.go`, `loopback.go` with structured **zerolog** per
+  the Beeper Go Guidelines. As the top-level program the command configures one
+  console logger and embeds it in the `context`; callees resolve it with
+  `zerolog.Ctx(ctx)`; the `coordinator` carries a logger field; whatsmeow's own
+  logs bridge in via `waLog.Zerolog(...).Sub(...)`. Log keys are `snake_case`,
+  errors carry `.Err(err)`, and levels span info/debug/warn/error. Logs are
+  **sanitized**: callKey, relay key, and tokens are logged as byte-lengths only,
+  never their contents. No library code or KATs touched (examples is its own
+  module); `go build`/`vet`/`test` clean.
+
 ### audit — behavioral validation against the Rust reference (multi-agent)
 - Ran a 28-module Go-vs-Rust behavioral audit (KAT + line-for-line fidelity +
   adversarial refutation). Result: **0 real behavioral divergences**; the flagged

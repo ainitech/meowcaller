@@ -1,12 +1,13 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"fmt"
-	"log"
 
 	meowcaller "github.com/purpshell/meowcaller"
 	"github.com/purpshell/meowcaller/mlow"
+	"github.com/rs/zerolog"
 )
 
 // loopbackSSRC is an arbitrary fixed SSRC for the local round-trip.
@@ -16,7 +17,8 @@ const loopbackSSRC = 0x12345678
 // speaker — MLow encode → E2E-SRTP protect (RTP WARP header + WARP MI tag) →
 // unprotect → MLow decode — with no WhatsApp connection. It exercises every byte
 // of the codec + keying + framing layers end to end on real audio hardware.
-func runLoopback() error {
+func runLoopback(ctx context.Context) error {
+	log := zerolog.Ctx(ctx)
 	a, err := newAudio()
 	if err != nil {
 		return fmt.Errorf("init audio: %w", err)
@@ -53,24 +55,28 @@ func runLoopback() error {
 		return fmt.Errorf("recv pipeline: %w", err)
 	}
 
-	log.Println("loopback: mic → MLow → E2E-SRTP protect/unprotect → MLow → speaker. Ctrl+C to stop.")
+	log.Info().Msg("loopback running: mic -> MLow -> E2E-SRTP protect/unprotect -> MLow -> speaker (Ctrl+C to stop)")
 	var n uint64
 	for pcm := range mic {
 		payload, err := enc.Encode(pcmToFloat(pcm))
 		if err != nil {
-			continue // skip frames the encoder rejects rather than abort the call
+			// Skip frames the encoder rejects rather than abort the loopback.
+			log.Debug().Err(err).Msg("skipping frame: encode failed")
+			continue
 		}
 		packet, err := send.ProtectAudio(payload)
 		if err != nil {
+			log.Debug().Err(err).Msg("skipping frame: protect failed")
 			continue
 		}
 		_, decoded, ok := recv.UnprotectAudio(packet)
 		if !ok {
+			log.Debug().Msg("skipping frame: unprotect failed")
 			continue
 		}
 		speaker <- floatToPCM(dec.Decode(decoded))
 		if n++; n%100 == 0 {
-			log.Printf("%d frames piped through the voip stack (%ds)", n, n*60/1000)
+			log.Debug().Uint64("frames", n).Uint64("elapsed_s", n*60/1000).Msg("frames piped through the voip stack")
 		}
 	}
 	return nil

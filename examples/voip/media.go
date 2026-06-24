@@ -4,9 +4,8 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
-	"fmt"
-	"log"
 	"encoding/hex"
+	"fmt"
 	"net"
 	"os"
 	"strconv"
@@ -20,6 +19,7 @@ import (
 	"github.com/purpshell/meowcaller/relay"
 	"github.com/purpshell/meowcaller/rtp"
 	"github.com/purpshell/meowcaller/stun"
+	"github.com/rs/zerolog"
 	waBinary "go.mau.fi/whatsmeow/binary"
 )
 
@@ -33,17 +33,17 @@ type pktDump struct {
 	start time.Time
 }
 
-func newPktDump() *pktDump {
+func newPktDump(log zerolog.Logger) *pktDump {
 	if os.Getenv("MEOW_DUMP") == "" {
 		return nil
 	}
 	path := fmt.Sprintf("/tmp/meow-voip-dump-%d.jsonl", os.Getpid())
 	f, err := os.Create(path)
 	if err != nil {
-		log.Printf("dump: %v", err)
+		log.Warn().Err(err).Msg("dump file create failed")
 		return nil
 	}
-	log.Printf("📦 packet dump → %s", path)
+	log.Debug().Str("path", path).Msg("packet dump -> path")
 	return &pktDump{f: f, start: time.Now()}
 }
 
@@ -255,13 +255,14 @@ func getMediaRelayEndpoint(rd *relayData) *relayEndpoint {
 
 // ---- relay connect + media loop (port of voip.rs connect_and_allocate + run_media) ----
 
-func connectAndAllocate(rd *relayData) (*relay.RelayMediaChannel, []byte, error) {
+func connectAndAllocate(ctx context.Context, rd *relayData) (*relay.RelayMediaChannel, []byte, error) {
+	log := zerolog.Ctx(ctx)
 	ep := getMediaRelayEndpoint(rd)
 	if ep == nil || len(ep.addresses) == 0 {
 		return nil, nil, fmt.Errorf("relay has no usable endpoint")
 	}
 	addr := &net.UDPAddr{IP: net.ParseIP(ep.addresses[0].ipv4), Port: int(ep.addresses[0].port)}
-	log.Printf("🔌 connecting media transport to relay %s %s…", ep.relayName, addr)
+	log.Info().Str("relay_name", ep.relayName).Str("addr", addr.String()).Msg("connecting media transport to relay")
 
 	type result struct {
 		ch  *relay.RelayMediaChannel
@@ -282,7 +283,7 @@ func connectAndAllocate(rd *relayData) (*relay.RelayMediaChannel, []byte, error)
 	case <-time.After(12 * time.Second):
 		return nil, nil, fmt.Errorf("relay connect timed out (DTLS didn't complete)")
 	}
-	log.Printf("✅ relay DataChannel OPEN to %s", ep.relayName)
+	log.Info().Str("relay_name", ep.relayName).Msg("relay DataChannel open")
 
 	if int(ep.tokenID) >= len(rd.relayTokens) || rd.relayTokens[ep.tokenID] == nil {
 		return nil, nil, fmt.Errorf("no relay token #%d", ep.tokenID)
@@ -297,12 +298,18 @@ func connectAndAllocate(rd *relayData) (*relay.RelayMediaChannel, []byte, error)
 	var tx [12]byte
 	_, _ = rand.Read(tx[:])
 	allocate := stun.BuildWasmStunAllocateRequest(tx, rd.relayTokens[ep.tokenID], endpointXor, rd.relayKeyASCII)
-	log.Printf("🔑 allocate creds: relay=%s ep=%s token#%d(%dB) authToken#%d key=%dB",
-		ep.relayName, addr, ep.tokenID, len(rd.relayTokens[ep.tokenID]), ep.authTokenID, len(rd.relayKeyASCII))
+	log.Info().
+		Str("relay_name", ep.relayName).
+		Str("addr", addr.String()).
+		Uint32("token_id", ep.tokenID).
+		Int("token_bytes", len(rd.relayTokens[ep.tokenID])).
+		Uint32("auth_token_id", ep.authTokenID).
+		Int("key_bytes", len(rd.relayKeyASCII)).
+		Msg("allocate creds")
 	if _, err := ch.Send(allocate); err != nil {
 		return nil, nil, fmt.Errorf("allocate send: %w", err)
 	}
-	log.Printf("📡 sent STUN Allocate (%d bytes)", len(allocate))
+	log.Info().Int("bytes", len(allocate)).Msg("sent STUN allocate")
 	return ch, allocate, nil
 }
 
@@ -310,13 +317,14 @@ func connectAndAllocate(rd *relayData) (*relay.RelayMediaChannel, []byte, error)
 // protect → DataChannel, and DataChannel → unprotect → MLow → speaker, with a 1 Hz
 // allocate+ping keepalive (the relay drops us without consent-freshness traffic).
 func runMedia(ctx context.Context, callID string, callKey []byte, selfLID, peerLID string, rd *relayData) error {
-	ch, allocate, err := connectAndAllocate(rd)
+	log := zerolog.Ctx(ctx)
+	ch, allocate, err := connectAndAllocate(ctx, rd)
 	if err != nil {
 		return err
 	}
 	defer ch.Close()
 
-	dump := newPktDump()
+	dump := newPktDump(*zerolog.Ctx(ctx))
 	defer dump.close()
 	dump.rec("out", "allocate", allocate)
 
@@ -337,7 +345,11 @@ func runMedia(ctx context.Context, callID string, callKey []byte, selfLID, peerL
 	if err != nil {
 		return err
 	}
-	log.Printf("media: self=%s peer=%s ssrc=%#08x", selfLID, peerLID, ssrc)
+	log.Info().
+		Str("self_lid", selfLID).
+		Str("peer_lid", peerLID).
+		Str("ssrc", fmt.Sprintf("0x%08x", ssrc)).
+		Msg("media session")
 
 	enc := mlow.NewMlowEncoder()
 	dec := mlow.NewMlowDecoder()
@@ -369,7 +381,7 @@ func runMedia(ctx context.Context, callID string, callKey []byte, selfLID, peerL
 			case <-time.After(d):
 			}
 			if relayRx.Load() == 0 {
-				log.Printf("⚠ relay silent %dms after Allocate — no bytes back yet (allocate undelivered or rejected)", d.Milliseconds())
+				log.Warn().Dur("after", d).Msg("relay silent after allocate, no bytes back yet (allocate undelivered or rejected)")
 			}
 		}
 	}()
@@ -438,9 +450,9 @@ func runMedia(ctx context.Context, callID string, callKey []byte, selfLID, peerL
 			}
 			dump.rec("out", "rtp", packet)
 			if txCount++; txCount == 1 {
-				log.Printf("📤 first RTP sent to relay (%d bytes) — outbound media flowing (silence until mic ready)", len(packet))
+				log.Info().Int("bytes", len(packet)).Msg("first RTP sent to relay, outbound media flowing (silence until mic ready)")
 			} else if txCount%250 == 0 {
-				log.Printf("📤 sent %d RTP packets to relay", txCount)
+				log.Debug().Uint64("packet_count", txCount).Msg("sent RTP packets to relay")
 			}
 		}
 	}()
@@ -450,23 +462,23 @@ func runMedia(ctx context.Context, callID string, callKey []byte, selfLID, peerL
 	go func() {
 		a, err := newAudio()
 		if err != nil {
-			log.Printf("audio init: %v", err)
+			log.Error().Err(err).Msg("audio init failed")
 			return
 		}
 		defer a.close()
 		mic, stopMic, err := a.openMic()
 		if err != nil {
-			log.Printf("open mic: %v", err)
+			log.Error().Err(err).Msg("open mic failed")
 			return
 		}
 		defer stopMic()
 		speaker, stopSpeaker, err := a.openSpeaker()
 		if err != nil {
-			log.Printf("open speaker: %v", err)
+			log.Error().Err(err).Msg("open speaker failed")
 			return
 		}
 		defer stopSpeaker()
-		log.Printf("🎙 audio devices ready")
+		log.Info().Msg("audio devices ready")
 
 		// Speaker pump: drain decoded PCM from the recv loop to the speaker.
 		go func() {
@@ -534,13 +546,13 @@ func runMedia(ctx context.Context, callID string, callKey []byte, selfLID, peerL
 			switch {
 			case !dumpedAlloc && mt == stun.MsgAllocateSuccess:
 				dumpedAlloc = true
-				log.Printf("🔎 allocate-success attrs:%s", stunAttrSummary(pkt))
+				log.Debug().Str("attrs", stunAttrSummary(pkt)).Msg("allocate-success attrs")
 			case !dumpedBindReq && isStun && mt == stun.MsgBindingRequest:
 				dumpedBindReq = true
-				log.Printf("🔎 relay binding-request attrs:%s", stunAttrSummary(pkt))
+				log.Debug().Str("attrs", stunAttrSummary(pkt)).Msg("relay binding-request attrs")
 			case !dumpedBindOK && mt == stun.MsgBindingSuccess:
 				dumpedBindOK = true
-				log.Printf("🔎 binding-success attrs:%s", stunAttrSummary(pkt))
+				log.Debug().Str("attrs", stunAttrSummary(pkt)).Msg("binding-success attrs")
 			}
 			// Diagnostic: log the first 30 non-RTP packets so the relay handshake is visible.
 			if nonRtpLogged < 30 {
@@ -548,30 +560,30 @@ func runMedia(ctx context.Context, callID string, callKey []byte, selfLID, peerL
 				switch {
 				case stun.IsAllocateError(pkt):
 					if code, ok := stun.ParseStunErrorCode(pkt); ok {
-						log.Printf("◀ relay: STUN ALLOCATE ERROR code=%d (%dB) — allocate rejected", code, n)
+						log.Debug().Str("kind", "allocate-error").Int("code", int(code)).Int("bytes", n).Msg("relay packet")
 					} else {
-						log.Printf("◀ relay: STUN allocate error (%dB) — allocate rejected", n)
+						log.Debug().Str("kind", "allocate-error").Int("bytes", n).Msg("relay packet")
 					}
 				case isStun && mt == stun.MsgBindingRequest:
-					log.Printf("◀ relay: STUN binding-request → answered binding-success (%dB)", n)
+					log.Debug().Str("kind", "binding-request").Str("stun_type", fmt.Sprintf("0x%04x", mt)).Int("bytes", n).Msg("relay packet answered binding-success")
 				case stun.IsAllocateOrBindingSuccess(pkt):
-					log.Printf("◀ relay: STUN success type=0x%04x (%dB)", mt, n)
+					log.Debug().Str("kind", "success").Str("stun_type", fmt.Sprintf("0x%04x", mt)).Int("bytes", n).Msg("relay packet")
 				case isStun:
-					log.Printf("◀ relay: STUN type=0x%04x (%dB)", mt, n)
+					log.Debug().Str("kind", "stun").Str("stun_type", fmt.Sprintf("0x%04x", mt)).Int("bytes", n).Msg("relay packet")
 				default:
-					log.Printf("◀ relay: non-RTP packet (%dB, first byte 0x%02x)", n, pkt[0])
+					log.Debug().Str("kind", "non-rtp").Str("first_byte", fmt.Sprintf("0x%02x", pkt[0])).Int("bytes", n).Msg("relay packet")
 				}
 			}
 			continue
 		}
 		dump.rec("in", "rtp", pkt)
 		if rtpSeen++; rtpSeen == 1 {
-			log.Printf("📥 first RTP-classified packet from relay (%dB) — relay is bridging the peer's media", n)
+			log.Info().Int("bytes", n).Msg("first RTP-classified packet from relay, relay is bridging the peer's media")
 		}
 		_, payload, ok := rxPipe.UnprotectAudio(pkt)
 		if !ok {
 			if unprotectFail++; unprotectFail == 1 {
-				log.Printf("⚠ RTP arrived but failed to unprotect (%dB) — keying/SSRC mismatch on the recv path", n)
+				log.Warn().Int("bytes", n).Msg("RTP arrived but failed to unprotect, keying/SSRC mismatch on the recv path")
 			}
 			continue
 		}
@@ -580,7 +592,7 @@ func runMedia(ctx context.Context, callID string, callKey []byte, selfLID, peerL
 		default: // speaker not draining (audio not ready yet) — drop rather than stall consent
 		}
 		if rtpIn++; rtpIn == 1 {
-			log.Printf("🔊 first RTP decoded from relay — inbound audio flowing")
+			log.Info().Msg("first RTP decoded from relay, inbound audio flowing")
 		}
 	}
 }

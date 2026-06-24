@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/gen2brain/malgo v0.11.23
 	github.com/purpshell/meowcaller v0.0.0
+	github.com/rs/zerolog v1.35.1
 	go.mau.fi/whatsmeow v0.0.0-20260609091626-4e622162b959
 	google.golang.org/protobuf v1.36.11
 	modernc.org/sqlite v1.53.0
@@ -28,7 +29,6 @@ require (
 	github.com/pion/sctp v1.9.4 // indirect
 	github.com/pion/transport/v4 v4.0.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	github.com/rs/zerolog v1.35.1 // indirect
 	github.com/vektah/gqlparser/v2 v2.5.27 // indirect
 	go.mau.fi/libsignal v0.2.2 // indirect
 	go.mau.fi/util v0.9.9 // indirect
