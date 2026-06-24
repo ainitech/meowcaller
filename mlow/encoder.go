@@ -570,7 +570,7 @@ func EncodeSmplFrame(fp *SmplFrameParams, log ...zerolog.Logger) ([]byte, error)
 	lg := pickLog(log)
 	const p2, p3, p4 = int32(320), int32(4), int32(1)
 	p6 := int32(fp.Config)
-	lg.Debug().Uint8("toc_byte", fp.TOC).Int("config", fp.Config).Int("internal_frames", 3).Msg("encode frame")
+	lg.Trace().Uint8("toc_byte", fp.TOC).Int("config", fp.Config).Int("internal_frames", 3).Msg("encode frame")
 	tbl := LoadSmplTables()
 	mem := LoadSmplMem()
 	enc := NewRangeEncoder(1 + SmplEncodeBufBytes)
@@ -597,7 +597,7 @@ func EncodeSmplFrame(fp *SmplFrameParams, log ...zerolog.Logger) ([]byte, error)
 	out := make([]byte, 0, 1+n)
 	out = append(out, fp.TOC)
 	out = append(out, body[:n]...)
-	lg.Debug().Int("frame_bytes", len(out)).Int("body_bytes", n).Msg("encode frame: done")
+	lg.Trace().Int("frame_bytes", len(out)).Int("body_bytes", n).Msg("encode frame: done")
 	return out, nil
 }
 

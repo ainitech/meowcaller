@@ -7,6 +7,15 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
 
 ## [Unreleased]
 
+### mlow — move per-frame encode/decode logs from debug to trace
+- The routine per-frame encode/decode logs (`encode frame`/`encode frame: done`,
+  `decode frame`/`decode active frame`, the per-frame "emitting silence" outcomes,
+  `red depack: done`) fired ~50×/sec at debug level and flooded a live call. Moved
+  them to **trace** (per the documented granularity: trace = per-frame state). Default
+  debug output is now quiet; genuine rare events (buffer overflow, wrong frame size,
+  RED-depack failure, unexpected standard-Opus packet) stay at debug. Full per-frame
+  detail remains under `MEOW_LOG_LEVEL=trace`. KATs green.
+
 ### meowcaller — implement the managed calling API; collapse the CLI example
 - Filled the managed engine (`engine.go` + `engine_media.go`) by lifting the entire
   calling orchestration out of `examples/cli` into the library: signaling (offer /

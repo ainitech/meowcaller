@@ -54,7 +54,7 @@ func (d *MlowDecoder) Reset() {
 func (d *MlowDecoder) Decode(payload []byte) []float32 {
 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/ed12f359a086b28e807ba236f0977af1000859fe/wacore/src/voip/mlow/decoder.rs#L54-L72
 	if len(payload) == 0 {
-		d.log.Debug().Msg("decode: empty payload, emitting silence")
+		d.log.Trace().Msg("decode: empty payload, emitting silence")
 		return make([]float32, opusFrameSamps)
 	}
 	d.log.Trace().Int("payload_bytes", len(payload)).Int32("redundancy", d.redundancy).Msg("decode packet")
@@ -68,7 +68,7 @@ func (d *MlowDecoder) Decode(payload []byte) []float32 {
 		if len(frames) > 0 {
 			main = frames[len(frames)-1].Data // the main (current) frame is last
 		}
-		d.log.Debug().Int("red_frames", len(frames)).Int("main_bytes", len(main)).Msg("decode: RED depacked")
+		d.log.Trace().Int("red_frames", len(frames)).Int("main_bytes", len(main)).Msg("decode: RED depacked")
 		return d.decodeFrame(main)
 	}
 	return d.decodeFrame(payload)
@@ -77,7 +77,7 @@ func (d *MlowDecoder) Decode(payload []byte) []float32 {
 func (d *MlowDecoder) decodeFrame(frame []byte) []float32 {
 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/ed12f359a086b28e807ba236f0977af1000859fe/wacore/src/voip/mlow/decoder.rs#L74-L99
 	if len(frame) == 0 {
-		d.log.Debug().Msg("decode frame: empty, emitting silence")
+		d.log.Trace().Msg("decode frame: empty, emitting silence")
 		return make([]float32, opusFrameSamps)
 	}
 	toc := ParseSmplTOC(frame[0], d.log)
@@ -87,7 +87,7 @@ func (d *MlowDecoder) decodeFrame(frame []byte) []float32 {
 	} else {
 		outLen = toc.SampleRate / 1000 * toc.FrameMs
 	}
-	d.log.Debug().Int("frame_bytes", len(frame)).Uint8("toc_byte", frame[0]).
+	d.log.Trace().Int("frame_bytes", len(frame)).Uint8("toc_byte", frame[0]).
 		Bool("std_opus", toc.StdOpus).Bool("sid", toc.SID).Bool("active", toc.Active).
 		Bool("voiced", toc.Voiced).Int("frame_ms", toc.FrameMs).Int("sample_rate", toc.SampleRate).
 		Int("out_len", outLen).Msg("decode frame")
@@ -96,7 +96,7 @@ func (d *MlowDecoder) decodeFrame(frame []byte) []float32 {
 		return make([]float32, outLen)
 	}
 	if toc.SID || !toc.Active {
-		d.log.Debug().Bool("sid", toc.SID).Bool("active", toc.Active).Msg("decode frame: inactive/SID, emitting silence")
+		d.log.Trace().Bool("sid", toc.SID).Bool("active", toc.Active).Msg("decode frame: inactive/SID, emitting silence")
 		return make([]float32, outLen)
 	}
 	return d.decodeActiveFrame(frame, outLen)
@@ -111,7 +111,7 @@ func (d *MlowDecoder) decodeActiveFrame(frame []byte, outLen int) []float32 {
 	dec := NewRangeDecoder(frame[1:])
 	lowRate := (frame[0]>>2)&1 != 0
 
-	d.log.Debug().Int("config", config).Bool("low_rate", lowRate).Int("body_bytes", len(frame)-1).Int("internal_frames", 3).Msg("decode active frame")
+	d.log.Trace().Int("config", config).Bool("low_rate", lowRate).Int("body_bytes", len(frame)-1).Int("internal_frames", 3).Msg("decode active frame")
 
 	out := make([]float32, 0, 3*SmplIntfLen)
 	packetLags := make([]float32, 0, 3*8)
