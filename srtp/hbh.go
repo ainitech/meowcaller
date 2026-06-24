@@ -6,6 +6,7 @@ import (
 	"errors"
 
 	"github.com/purpshell/meowcaller/util"
+	"github.com/rs/zerolog"
 )
 
 // errBadHbhKeyLen is returned when the hop-by-hop key is not exactly 30 bytes,
@@ -43,11 +44,13 @@ func keyingFromCryptoKey(cryptoKey []byte) SrtpKeyingMaterial {
 
 // deriveHbhSrtpKeyWithLabels runs the two-stage WA-SFU KDF (HKDF-SHA256 with the
 // literal label as info): stage 1 derives the srtcp salt, stage 2 the 30-byte key.
-func deriveHbhSrtpKeyWithLabels(hbhKey []byte, saltLabel, keyLabel string) ([]byte, error) {
+func deriveHbhSrtpKeyWithLabels(lg zerolog.Logger, hbhKey []byte, saltLabel, keyLabel string) ([]byte, error) {
 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4e6ba4610e054e9ede3af1d5e88a83faee/wacore/src/voip/hbh_srtp.rs#L46-L64
 	if len(hbhKey) != 30 {
+		lg.Debug().Err(errBadHbhKeyLen).Int("hbh_key_bytes", len(hbhKey)).Str("key_label", keyLabel).Msg("hbh key derivation rejected: bad key length")
 		return nil, errBadHbhKeyLen
 	}
+	lg.Debug().Int("hbh_key_bytes", len(hbhKey)).Str("salt_label", saltLabel).Str("key_label", keyLabel).Msg("deriving hbh srtp key")
 	masterKey := hbhKey[0:16]
 	masterSalt := hbhKey[16:30]
 	srtcpSalt, err := util.HKDFSHA256(make([]byte, 32), masterSalt, []byte(saltLabel), 32)
@@ -58,21 +61,21 @@ func deriveHbhSrtpKeyWithLabels(hbhKey []byte, saltLabel, keyLabel string) ([]by
 }
 
 // DeriveHbhSrtpKeyUplink derives the 30-byte uplink HBH SRTP key from hbhKey (30B).
-func DeriveHbhSrtpKeyUplink(hbhKey []byte) ([]byte, error) {
+func DeriveHbhSrtpKeyUplink(hbhKey []byte, log ...zerolog.Logger) ([]byte, error) {
 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4e6ba4610e054e9ede3af1d5e88a83faee/wacore/src/voip/hbh_srtp.rs#L66-L68
-	return deriveHbhSrtpKeyWithLabels(hbhKey, "uplink hbh srtcp salt", "uplink hbh srtcp key")
+	return deriveHbhSrtpKeyWithLabels(pickLog(log), hbhKey, "uplink hbh srtcp salt", "uplink hbh srtcp key")
 }
 
 // DeriveHbhSrtpKeyDownlink derives the 30-byte downlink HBH SRTP key from hbhKey (30B).
-func DeriveHbhSrtpKeyDownlink(hbhKey []byte) ([]byte, error) {
+func DeriveHbhSrtpKeyDownlink(hbhKey []byte, log ...zerolog.Logger) ([]byte, error) {
 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4e6ba4610e054e9ede3af1d5e88a83faee/wacore/src/voip/hbh_srtp.rs#L70-L72
-	return deriveHbhSrtpKeyWithLabels(hbhKey, "downlink hbh srtcp salt", "downlink hbh srtcp key")
+	return deriveHbhSrtpKeyWithLabels(pickLog(log), hbhKey, "downlink hbh srtcp salt", "downlink hbh srtcp key")
 }
 
 // KeyingFromHbhKeyUplink derives the uplink key and splits it into keying material.
-func KeyingFromHbhKeyUplink(hbhKey []byte) (SrtpKeyingMaterial, error) {
+func KeyingFromHbhKeyUplink(hbhKey []byte, log ...zerolog.Logger) (SrtpKeyingMaterial, error) {
 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4e6ba4610e054e9ede3af1d5e88a83faee/wacore/src/voip/hbh_srtp.rs#L74-L78
-	k, err := DeriveHbhSrtpKeyUplink(hbhKey)
+	k, err := DeriveHbhSrtpKeyUplink(hbhKey, pickLog(log))
 	if err != nil {
 		return SrtpKeyingMaterial{}, err
 	}
@@ -80,9 +83,9 @@ func KeyingFromHbhKeyUplink(hbhKey []byte) (SrtpKeyingMaterial, error) {
 }
 
 // KeyingFromHbhKeyDownlink derives the downlink key and splits it into keying material.
-func KeyingFromHbhKeyDownlink(hbhKey []byte) (SrtpKeyingMaterial, error) {
+func KeyingFromHbhKeyDownlink(hbhKey []byte, log ...zerolog.Logger) (SrtpKeyingMaterial, error) {
 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4e6ba4610e054e9ede3af1d5e88a83faee/wacore/src/voip/hbh_srtp.rs#L80-L84
-	k, err := DeriveHbhSrtpKeyDownlink(hbhKey)
+	k, err := DeriveHbhSrtpKeyDownlink(hbhKey, pickLog(log))
 	if err != nil {
 		return SrtpKeyingMaterial{}, err
 	}
@@ -146,8 +149,10 @@ func deriveSessionBytes(masterKey, masterSalt []byte, label byte, length int) ([
 
 // ExpandLibsrtpSessionKeys runs the libsrtp session-key expansion (labels 0x00 enc,
 // 0x01 auth, 0x02 salt).
-func ExpandLibsrtpSessionKeys(keying *SrtpKeyingMaterial) (LibsrtpSessionKeys, error) {
+func ExpandLibsrtpSessionKeys(keying *SrtpKeyingMaterial, log ...zerolog.Logger) (LibsrtpSessionKeys, error) {
 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4e6ba4610e054e9ede3af1d5e88a83faee/wacore/src/voip/hbh_srtp.rs#L132-L157
+	lg := pickLog(log)
+	lg.Debug().Msg("expanding libsrtp session keys")
 	var out LibsrtpSessionKeys
 	sessionKey, err := deriveSessionBytes(keying.MasterKey[:], keying.MasterSalt[:], labelRTPEncryption, 16)
 	if err != nil {
@@ -179,9 +184,16 @@ func BuildRtpICMNonce(ssrc uint32, packetIndex uint64) [16]byte {
 
 // CryptRtpPayload encrypts/decrypts an RTP payload with the expanded session key
 // (symmetric).
-func CryptRtpPayload(session *LibsrtpSessionKeys, ssrc uint32, packetIndex uint64, payload []byte) ([]byte, error) {
+func CryptRtpPayload(session *LibsrtpSessionKeys, ssrc uint32, packetIndex uint64, payload []byte, log ...zerolog.Logger) ([]byte, error) {
 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4e6ba4610e054e9ede3af1d5e88a83faee/wacore/src/voip/hbh_srtp.rs#L168-L177
+	lg := pickLog(log)
 	icmKey := aesICMKey30(session.SessionKey[:], session.SessionSalt[:])
 	nonce := BuildRtpICMNonce(ssrc, packetIndex)
-	return aesICMCrypt(icmKey[:], nonce[:], payload)
+	out, err := aesICMCrypt(icmKey[:], nonce[:], payload)
+	if err != nil {
+		lg.Debug().Err(err).Uint32("ssrc", ssrc).Uint64("packet_index", packetIndex).Msg("hbh rtp crypt failed")
+		return nil, err
+	}
+	lg.Trace().Uint32("ssrc", ssrc).Uint64("packet_index", packetIndex).Int("payload_bytes", len(payload)).Msg("hbh crypt rtp payload")
+	return out, nil
 }

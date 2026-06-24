@@ -2,6 +2,8 @@ package mlow
 
 import (
 	"math"
+
+	"github.com/rs/zerolog"
 )
 
 // Low-band synthesis: NLSF reconstruction, NLSF→LPC, gain linearization, LTP/ACB
@@ -457,8 +459,11 @@ func SynthInternalFrame(
 	pulses []int32,
 	gainQ *[4]int32,
 	pitch *SmplPitchSynth,
+	log ...zerolog.Logger,
 ) (signal []float32, nlsf []float32) {
 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/ed12f359a086b28e807ba236f0977af1000859fe/wacore/src/voip/mlow/smpl_synth.rs#L543-L662
+	lg := pickLog(log)
+	lg.Trace().Int("stage1", stage1).Int("grid", grid).Int("pulses_len", len(pulses)).Int("prev_nlsf_len", len(prevNLSF)).Msg("synth internal frame")
 	// Exercised end-to-end by TestEncodeRoundTripsATone (the encoder shadow-synth
 	// path reconstructs a tone at correlation 0.89). Correlation-bounded, not
 	// bit-exact — there is no isolated vector for this WASM-domain alt synth path.

@@ -1,5 +1,7 @@
 package mlow
 
+import "github.com/rs/zerolog"
+
 // SmplTOC is the decoded first byte of an inbound MLow frame: how to interpret
 // the rest of the frame, or that it is a standard Opus packet to route elsewhere.
 type SmplTOC struct {
@@ -39,9 +41,11 @@ func standardOpusFrameMs(b byte) int {
 }
 
 // ParseSmplTOC decodes the TOC byte at the head of an inbound MLow frame.
-func ParseSmplTOC(b byte) SmplTOC {
+func ParseSmplTOC(b byte, log ...zerolog.Logger) SmplTOC {
 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/674e85164b35ca19115dfebcf605708d15951ee7/wacore/src/voip/mlow/toc.rs#L43-L87
+	lg := pickLog(log)
 	if b&0xC0 == 0xC0 {
+		lg.Trace().Uint8("toc_byte", b).Bool("std_opus", true).Msg("parse toc: standard-Opus packet")
 		return SmplTOC{
 			StdOpus:    true,
 			SampleRate: 16000,
@@ -54,7 +58,7 @@ func ParseSmplTOC(b byte) SmplTOC {
 	if b&0x20 != 0 {
 		sampleRate = 32000
 	}
-	return SmplTOC{
+	toc := SmplTOC{
 		SID:        b>>7 != 0,
 		VAD:        vad,
 		SampleRate: sampleRate,
@@ -64,4 +68,8 @@ func ParseSmplTOC(b byte) SmplTOC {
 		Flag2:      (b>>2)&1 != 0,
 		Flag0:      b&1 != 0,
 	}
+	lg.Trace().Uint8("toc_byte", b).Bool("sid", toc.SID).Bool("vad", toc.VAD).
+		Bool("voiced", toc.Voiced).Bool("active", toc.Active).Int("frame_ms", toc.FrameMs).
+		Int("sample_rate", toc.SampleRate).Msg("parse toc")
+	return toc
 }

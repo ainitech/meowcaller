@@ -3,6 +3,8 @@ package mlow
 import (
 	"errors"
 	"math"
+
+	"github.com/rs/zerolog"
 )
 
 // MLow ENCODER (module #16, outbound counterpart of mlow/decoder).
@@ -563,16 +565,20 @@ func encodeSmplPitch(enc *RangeEncoder, _ *SmplMem, st *SmplLsfState, p2, p3, p6
 
 // EncodeSmplFrame builds [TOC || range-coded body] from analyzed frame parameters
 // (the exact inverse of the decoder's active-frame body decode).
-func EncodeSmplFrame(fp *SmplFrameParams) ([]byte, error) {
+func EncodeSmplFrame(fp *SmplFrameParams, log ...zerolog.Logger) ([]byte, error) {
 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/ed12f359a086b28e807ba236f0977af1000859fe/wacore/src/voip/mlow/encode.rs#L61-L102
+	lg := pickLog(log)
 	const p2, p3, p4 = int32(320), int32(4), int32(1)
 	p6 := int32(fp.Config)
+	lg.Debug().Uint8("toc_byte", fp.TOC).Int("config", fp.Config).Int("internal_frames", 3).Msg("encode frame")
 	tbl := LoadSmplTables()
 	mem := LoadSmplMem()
 	enc := NewRangeEncoder(1 + SmplEncodeBufBytes)
 	var st SmplLsfState
 	for f := 0; f < 3; f++ {
 		ip := &fp.Internal[f]
+		lg.Trace().Int("intf", f).Bool("voiced", ip.Lsf.Stage1 == 1).Int32("stage1", ip.Lsf.Stage1).
+			Int32("total_pulses", ip.Pulses.Total).Bool("has_pitch", ip.HasPitch).Msg("encode internal frame params")
 		encodeSmplLsf(enc, tbl, &st, fp.Config, f, &ip.Lsf)
 		encodeSmplPulses(enc, mem, p2, p3, p4, p6, ip.Lsf.Stage1, &ip.Pulses)
 		if ip.Lsf.Stage1 == 1 {
@@ -583,6 +589,7 @@ func EncodeSmplFrame(fp *SmplFrameParams) ([]byte, error) {
 	}
 	enc.Done()
 	if enc.Err() != 0 {
+		lg.Debug().Int32("err", enc.Err()).Msg("encode frame: range-encoder buffer overflow")
 		return nil, errors.New("mlow encode: range-encoder buffer overflow")
 	}
 	n := enc.ConsumedLen()
@@ -590,6 +597,7 @@ func EncodeSmplFrame(fp *SmplFrameParams) ([]byte, error) {
 	out := make([]byte, 0, 1+n)
 	out = append(out, fp.TOC)
 	out = append(out, body[:n]...)
+	lg.Debug().Int("frame_bytes", len(out)).Int("body_bytes", n).Msg("encode frame: done")
 	return out, nil
 }
 
@@ -597,12 +605,13 @@ func EncodeSmplFrame(fp *SmplFrameParams) ([]byte, error) {
 // history (SmplEncoderState, in analysis.go) persists across Encode calls.
 type MlowEncoder struct {
 	state SmplEncoderState
+	log   zerolog.Logger
 }
 
 // NewMlowEncoder allocates a fresh encoder.
-func NewMlowEncoder() *MlowEncoder {
+func NewMlowEncoder(opts ...Option) *MlowEncoder {
 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/ed12f359a086b28e807ba236f0977af1000859fe/wacore/src/voip/mlow/encode.rs#L33-L37
-	return &MlowEncoder{}
+	return &MlowEncoder{log: resolveConfig(opts).log}
 }
 
 // Reset clears the cross-frame analysis history (call at a stream discontinuity).
@@ -616,8 +625,10 @@ func (e *MlowEncoder) Reset() {
 func (e *MlowEncoder) Encode(pcm []float32) ([]byte, error) {
 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/ed12f359a086b28e807ba236f0977af1000859fe/wacore/src/voip/mlow/encode.rs#L46-L57
 	if len(pcm) != opusFrameSamps {
+		e.log.Debug().Int("samples", len(pcm)).Int("want", opusFrameSamps).Msg("encode: wrong frame size")
 		return nil, errors.New("mlow encode: expected 960 samples (60 ms @16 kHz)")
 	}
+	e.log.Trace().Int("samples", len(pcm)).Msg("encode frame: sanitizing and analyzing")
 	clean := make([]float32, len(pcm))
 	for i, s := range pcm {
 		switch {
@@ -631,5 +642,5 @@ func (e *MlowEncoder) Encode(pcm []float32) ([]byte, error) {
 		clean[i] = s
 	}
 	fp := smplAnalyzeFrameSt(&e.state, clean)
-	return EncodeSmplFrame(&fp)
+	return EncodeSmplFrame(&fp, e.log)
 }

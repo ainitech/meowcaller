@@ -7,6 +7,23 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
 
 ## [Unreleased]
 
+### lib — propagate sanitized opt-in zerolog debug/trace across the stack
+- Rolled the `session` logging convention out to every library package — `mlow`,
+  `srtp`, `rtp`, `stun`, `signaling`, `relay`, `util` — so the whole call + codec
+  path emits debug/trace. Stateful types (`RtpStream`, `SframeSession`,
+  `RelayMediaChannel`, `MlowDecoder`, `MlowEncoder`) carry a `log zerolog.Logger`
+  field set via an additive `WithLogger` option; stateless functions (HKDF, STUN
+  encode/parse, stanza builders, RTP header/SSRC, SRTP key-derivation/crypt) take a
+  trailing variadic `...zerolog.Logger` resolved by `pickLog`. Both default to
+  `zerolog.Nop()` — silent and zero-cost unless the top-level program wires a logger,
+  and **no existing exported signature or call site changed** (variadic/option are
+  source-compatible). Granularity is per-frame / per-packet / per-key-derivation;
+  no logging inside per-sample/per-symbol hot loops (rangecoder, FFT, filters stay
+  silent). Logs are **sanitized** — only lengths, counts, `ssrc`/`seq`/`roc`,
+  message/packet types, LIDs, flags; never key material, payload, ciphertext, PCM,
+  tokens, or IVs (verified by an independent per-package adversarial secret-leak
+  audit). All 28 module KATs stay green; `go build`/`vet`/`test`/`gofmt` clean.
+
 ### session — opt-in sanitized zerolog diagnostics (field-on-type)
 - Established the repo-wide library logging convention on the root package
   (`MediaPipeline`, `CallSession`): a `log zerolog.Logger` field set via an additive

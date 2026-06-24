@@ -8,6 +8,8 @@ import (
 	"hash/crc32"
 	"strconv"
 	"strings"
+
+	"github.com/rs/zerolog"
 )
 
 // STUN/WARP relay framing: an RFC 5389 TLV encoder with WhatsApp's
@@ -87,8 +89,9 @@ func stunPseudoHeader(msgType, msgLen uint16, transactionID [12]byte) [20]byte {
 
 // EncodeStunRequest encodes a STUN request: header + attrs, then optional
 // MESSAGE-INTEGRITY (nil integrityKey skips it) and optional FINGERPRINT.
-func EncodeStunRequest(msgType uint16, transactionID [12]byte, attrs []byte, integrityKey []byte, includeFingerprint bool) []byte {
+func EncodeStunRequest(msgType uint16, transactionID [12]byte, attrs []byte, integrityKey []byte, includeFingerprint bool, log ...zerolog.Logger) []byte {
 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4e6ba4610e054e9ede3af1d5e88a83faee/wacore/src/voip/stun.rs#L82-L118
+	lg := pickLog(log)
 	body := append([]byte(nil), attrs...)
 
 	if integrityKey != nil {
@@ -117,7 +120,15 @@ func EncodeStunRequest(msgType uint16, transactionID [12]byte, attrs []byte, int
 	out = binary.BigEndian.AppendUint16(out, uint16(len(body)))
 	out = binary.BigEndian.AppendUint32(out, stunMagic)
 	out = append(out, transactionID[:]...)
-	return append(out, body...)
+	out = append(out, body...)
+	lg.Trace().
+		Uint16("msg_type", msgType).
+		Int("attr_bytes", len(attrs)).
+		Bool("message_integrity", integrityKey != nil).
+		Bool("fingerprint", includeFingerprint).
+		Int("packet_bytes", len(out)).
+		Msg("encoded stun request")
+	return out
 }
 
 // CreateNativeSenderSubscription is a native WA sender sub: 1-byte count + BE SSRC.
@@ -131,8 +142,9 @@ func CreateNativeSenderSubscription(ssrc uint32) [5]byte {
 
 // EncodeXorRelayEndpoint XOR-encodes an IPv4:port into 6 bytes; ok=false if ipv4
 // is not exactly four dotted octets.
-func EncodeXorRelayEndpoint(ipv4 string, port uint16) ([6]byte, bool) {
+func EncodeXorRelayEndpoint(ipv4 string, port uint16, log ...zerolog.Logger) ([6]byte, bool) {
 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4e6ba4610e054e9ede3af1d5e88a83faee/wacore/src/voip/stun.rs#L129-L144
+	lg := pickLog(log)
 	var octets []byte
 	for part := range strings.SplitSeq(ipv4, ".") {
 		n, err := strconv.ParseUint(part, 10, 8)
@@ -142,6 +154,7 @@ func EncodeXorRelayEndpoint(ipv4 string, port uint16) ([6]byte, bool) {
 		octets = append(octets, byte(n))
 	}
 	if len(octets) != 4 {
+		lg.Debug().Int("octet_count", len(octets)).Msg("xor relay endpoint: malformed ipv4")
 		return [6]byte{}, false
 	}
 	var buf [6]byte
@@ -163,18 +176,25 @@ func createWasmRelayEndpointAttr(endpointXor [6]byte) [8]byte {
 
 // BuildWasmStunAllocateRequest builds the WASM/Web DataChannel Allocate: 0x4000
 // token + 0x4024 stream desc + 0x0016 endpoint + MI, no FP.
-func BuildWasmStunAllocateRequest(transactionID [12]byte, relayToken []byte, endpointXor [6]byte, integrityKey []byte) []byte {
+func BuildWasmStunAllocateRequest(transactionID [12]byte, relayToken []byte, endpointXor [6]byte, integrityKey []byte, log ...zerolog.Logger) []byte {
 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4e6ba4610e054e9ede3af1d5e88a83faee/wacore/src/voip/stun.rs#L155-L177
+	lg := pickLog(log)
+	lg.Debug().
+		Int("relay_token_bytes", len(relayToken)).
+		Bool("message_integrity", integrityKey != nil).
+		Msg("building wasm allocate request")
 	attrs := stunAttr(attrRelayToken, relayToken)
 	attrs = append(attrs, stunAttr(attrStreamDescriptors, wasmStreamDescriptorsTemplate)...)
 	wep := createWasmRelayEndpointAttr(endpointXor)
 	attrs = append(attrs, stunAttr(attrWasmRelayEndpoint, wep[:])...)
-	return EncodeStunRequest(MsgAllocateRequest, transactionID, attrs, integrityKey, false)
+	return EncodeStunRequest(MsgAllocateRequest, transactionID, attrs, integrityKey, false, lg)
 }
 
 // BuildWhatsappPing builds the WhatsApp consent ping (type 0x0801, empty body).
-func BuildWhatsappPing(transactionID [12]byte) [20]byte {
+func BuildWhatsappPing(transactionID [12]byte, log ...zerolog.Logger) [20]byte {
 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4e6ba4610e054e9ede3af1d5e88a83faee/wacore/src/voip/stun.rs#L180-L186
+	lg := pickLog(log)
+	lg.Trace().Uint16("msg_type", MsgWhatsappPing).Msg("built whatsapp consent ping")
 	var out [20]byte
 	binary.BigEndian.PutUint16(out[0:2], MsgWhatsappPing)
 	binary.BigEndian.PutUint32(out[4:8], stunMagic)
@@ -250,9 +270,11 @@ type StunAttribute struct {
 }
 
 // ParseStunAttributes parses the STUN attributes after the 20-byte header.
-func ParseStunAttributes(data []byte) []StunAttribute {
+func ParseStunAttributes(data []byte, log ...zerolog.Logger) []StunAttribute {
 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4e6ba4610e054e9ede3af1d5e88a83faee/wacore/src/voip/stun.rs#L231-L251
+	lg := pickLog(log)
 	if !IsStunPacket(data) || len(data) < 20 {
+		lg.Debug().Int("packet_bytes", len(data)).Msg("parse stun attributes: not a stun packet or too short")
 		return nil
 	}
 	var attrs []StunAttribute
@@ -270,17 +292,20 @@ func ParseStunAttributes(data []byte) []StunAttribute {
 		})
 		off += length + pad4(length)
 	}
+	lg.Trace().Int("attr_count", len(attrs)).Int("packet_bytes", len(data)).Msg("parsed stun attributes")
 	return attrs
 }
 
 // ParseStunErrorCode parses the numeric error code (class*100+number); ok=false if absent.
-func ParseStunErrorCode(data []byte) (uint16, bool) {
+func ParseStunErrorCode(data []byte, log ...zerolog.Logger) (uint16, bool) {
 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4e6ba4610e054e9ede3af1d5e88a83faee/wacore/src/voip/stun.rs#L254-L276
+	lg := pickLog(log)
 	if len(data) < 20 {
 		return 0, false
 	}
 	t, ok := StunMessageType(data)
 	if !ok || (t != MsgAllocateError && t != 0x0111) {
+		lg.Debug().Uint16("msg_type", t).Msg("parse stun error code: not an error response")
 		return 0, false
 	}
 	bodyLen := (int(data[2]) << 8) | int(data[3])
@@ -292,10 +317,13 @@ func ParseStunErrorCode(data []byte) (uint16, bool) {
 		if attrType == attrErrorCode && length >= 4 && off+8 <= len(data) {
 			class := uint16(data[off+6])
 			number := uint16(data[off+7])
-			return class*100 + number, true
+			code := class*100 + number
+			lg.Debug().Uint16("error_code", code).Msg("parsed stun error code")
+			return code, true
 		}
 		off += 4 + length + pad4(length)
 	}
+	lg.Debug().Msg("parse stun error code: no error-code attribute found")
 	return 0, false
 }
 
@@ -364,10 +392,18 @@ func CreateApkStreamDescriptors(ssrc uint32) []byte {
 
 // BuildAndroidStunAllocateRequest builds the APK Allocate: 0x4000 token + 0x4025
 // sender subs + 0x4024 stream desc + MI.
-func BuildAndroidStunAllocateRequest(transactionID [12]byte, relayToken []byte, ssrc uint32, pid *uint32, integrityKey []byte, includeFingerprint bool) []byte {
+func BuildAndroidStunAllocateRequest(transactionID [12]byte, relayToken []byte, ssrc uint32, pid *uint32, integrityKey []byte, includeFingerprint bool, log ...zerolog.Logger) []byte {
 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4e6ba4610e054e9ede3af1d5e88a83faee/wacore/src/voip/stun.rs#L346-L370
+	lg := pickLog(log)
+	lg.Debug().
+		Uint32("ssrc", ssrc).
+		Bool("has_pid", pid != nil).
+		Int("relay_token_bytes", len(relayToken)).
+		Bool("message_integrity", integrityKey != nil).
+		Bool("fingerprint", includeFingerprint).
+		Msg("building android allocate request")
 	attrs := stunAttr(attrRelayToken, relayToken)
 	attrs = append(attrs, stunAttr(attrSenderSubscriptionsV2, CreateApkSenderSubscriptions(ssrc, pid))...)
 	attrs = append(attrs, stunAttr(attrStreamDescriptors, CreateApkStreamDescriptors(ssrc))...)
-	return EncodeStunRequest(MsgAllocateRequest, transactionID, attrs, integrityKey, includeFingerprint)
+	return EncodeStunRequest(MsgAllocateRequest, transactionID, attrs, integrityKey, includeFingerprint, lg)
 }

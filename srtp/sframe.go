@@ -7,6 +7,7 @@ import (
 	"errors"
 
 	"github.com/purpshell/meowcaller/util"
+	"github.com/rs/zerolog"
 )
 
 // errBadCallKeyLen is returned when the call key is not exactly 32 bytes, the only
@@ -44,22 +45,28 @@ func splitCallKey(callKey []byte) (salt, ikm []byte, err error) {
 
 // DeriveE2eSframeKeyForParticipant derives the 32-byte per-participant SFrame key
 // from callKey (exactly 32B), salt = callKey[0:16], ikm = callKey[16:32].
-func DeriveE2eSframeKeyForParticipant(callKey []byte, participantID string) ([]byte, error) {
+func DeriveE2eSframeKeyForParticipant(callKey []byte, participantID string, log ...zerolog.Logger) ([]byte, error) {
 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4e6ba4610e054e9ede3af1d5e88a83faee/wacore/src/voip/sframe.rs#L42-L54
+	lg := pickLog(log)
 	salt, ikm, err := splitCallKey(callKey)
 	if err != nil {
+		lg.Debug().Err(err).Int("call_key_bytes", len(callKey)).Str("participant_id", participantID).Msg("sframe key derivation rejected: bad call key length")
 		return nil, err
 	}
+	lg.Debug().Str("participant_id", participantID).Msg("deriving e2e sframe key for participant")
 	return util.HKDFSHA256(salt, ikm, []byte(SframeInfoLabel(participantID)), 32)
 }
 
 // DeriveWarpAuthKey derives the 32-byte WARP auth key from callKey (32B), empty
 // salt, label "warp auth key".
-func DeriveWarpAuthKey(callKey []byte) ([]byte, error) {
+func DeriveWarpAuthKey(callKey []byte, log ...zerolog.Logger) ([]byte, error) {
 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4e6ba4610e054e9ede3af1d5e88a83faee/wacore/src/voip/sframe.rs#L56-L66
+	lg := pickLog(log)
 	if len(callKey) != 32 {
+		lg.Debug().Err(errBadCallKeyLen).Int("call_key_bytes", len(callKey)).Msg("warp auth key derivation rejected: bad call key length")
 		return nil, errBadCallKeyLen
 	}
+	lg.Debug().Msg("deriving warp auth key")
 	return util.HKDFSHA256(nil, callKey, []byte(KDFLabelWarpAuth), 32)
 }
 
@@ -143,24 +150,29 @@ type SframeSession struct {
 	encryptKey        [16]byte
 	decryptKey        [16]byte
 	txCounter         uint64
+	log               zerolog.Logger
 }
 
 // NewSframeSession builds a session from callKey and the self/peer JIDs.
-func NewSframeSession(callKey []byte, selfJID, peerJID string) (*SframeSession, error) {
+func NewSframeSession(callKey []byte, selfJID, peerJID string, opts ...Option) (*SframeSession, error) {
 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4e6ba4610e054e9ede3af1d5e88a83faee/wacore/src/voip/sframe.rs#L154-L172
+	cfg := resolveConfig(opts)
 	selfID := FormatSframeParticipantID(selfJID)
 	peerID := FormatSframeParticipantID(peerJID)
-	sendKey, err := DeriveE2eSframeKeyForParticipant(callKey, peerID)
+	sendKey, err := DeriveE2eSframeKeyForParticipant(callKey, peerID, cfg.log)
 	if err != nil {
+		cfg.log.Debug().Err(err).Str("peer_participant_id", peerID).Msg("sframe session send key derivation failed")
 		return nil, err
 	}
-	recvKey, err := DeriveE2eSframeKeyForParticipant(callKey, selfID)
+	recvKey, err := DeriveE2eSframeKeyForParticipant(callKey, selfID, cfg.log)
 	if err != nil {
+		cfg.log.Debug().Err(err).Str("self_participant_id", selfID).Msg("sframe session recv key derivation failed")
 		return nil, err
 	}
-	s := &SframeSession{SelfParticipantID: selfID, PeerParticipantID: peerID}
+	s := &SframeSession{SelfParticipantID: selfID, PeerParticipantID: peerID, log: cfg.log}
 	copy(s.encryptKey[:], sendKey[:aesKeyLen])
 	copy(s.decryptKey[:], recvKey[:aesKeyLen])
+	cfg.log.Debug().Str("self_participant_id", selfID).Str("peer_participant_id", peerID).Msg("sframe session established")
 	return s, nil
 }
 
@@ -173,11 +185,13 @@ func (s *SframeSession) Encrypt(plaintext []byte) ([]byte, error) {
 	iv := counterToIV(counter)
 	encrypted, err := gcmEncrypt(s.encryptKey[:], iv, plaintext)
 	if err != nil {
+		s.log.Debug().Err(err).Uint64("counter", counter).Msg("sframe encrypt failed")
 		return nil, err
 	}
 	out := make([]byte, 0, len(encrypted)+len(header))
 	out = append(out, encrypted...)
 	out = append(out, header...)
+	s.log.Trace().Uint64("counter", counter).Int("plaintext_bytes", len(plaintext)).Int("header_bytes", len(header)).Int("frame_bytes", len(out)).Msg("sframe encrypted frame")
 	return out, nil
 }
 
@@ -187,22 +201,32 @@ func (s *SframeSession) Encrypt(plaintext []byte) ([]byte, error) {
 func (s *SframeSession) Decrypt(frame []byte) ([]byte, bool) {
 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4e6ba4610e054e9ede3af1d5e88a83faee/wacore/src/voip/sframe.rs#L188-L213
 	if len(frame) < gcmTagLen+3 {
+		s.log.Debug().Int("frame_bytes", len(frame)).Msg("sframe decrypt: frame too short, treating as plain opus")
 		return nil, false
 	}
 	headerLen := int(frame[len(frame)-1])
 	if headerLen < 3 || headerLen > len(frame) {
+		s.log.Debug().Int("frame_bytes", len(frame)).Int("header_len", headerLen).Msg("sframe decrypt: bad header length, treating as plain opus")
 		return nil, false
 	}
 	headerStart := len(frame) - headerLen
 	header := frame[headerStart:]
 	ciphertext := frame[:headerStart]
 	if len(ciphertext) < gcmTagLen+1 {
+		s.log.Debug().Int("ciphertext_bytes", len(ciphertext)).Msg("sframe decrypt: ciphertext too short, treating as plain opus")
 		return nil, false
 	}
 	counter, _, ok := parseSframeHeader(header)
 	if !ok {
+		s.log.Debug().Int("header_bytes", len(header)).Msg("sframe decrypt: header parse failed, treating as plain opus")
 		return nil, false
 	}
 	iv := counterToIV(counter)
-	return gcmDecrypt(s.decryptKey[:], iv, ciphertext)
+	plain, ok := gcmDecrypt(s.decryptKey[:], iv, ciphertext)
+	if !ok {
+		s.log.Debug().Uint64("counter", counter).Int("ciphertext_bytes", len(ciphertext)).Msg("sframe decrypt: gcm auth failed, treating as plain opus")
+		return nil, false
+	}
+	s.log.Trace().Uint64("counter", counter).Int("frame_bytes", len(frame)).Int("plaintext_bytes", len(plain)).Msg("sframe decrypted frame")
+	return plain, true
 }

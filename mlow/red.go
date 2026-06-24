@@ -1,6 +1,10 @@
 package mlow
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/rs/zerolog"
+)
 
 // MLow RED ("SplitRed") depacketization — the outermost wire layer of a WhatsApp
 // MLow RTP audio payload (WASM func 3819). OPTIONAL: applied only when the call
@@ -24,12 +28,15 @@ var (
 
 // DepackSplitRed parses a SplitRed RED packet into its frames (redundant blocks in
 // header order, then the main frame last). Only call when RED was negotiated.
-func DepackSplitRed(p []byte) ([]MlowFrame, error) {
+func DepackSplitRed(p []byte, log ...zerolog.Logger) ([]MlowFrame, error) {
 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/ed12f359a086b28e807ba236f0977af1000859fe/wacore/src/voip/mlow/red.rs#L32-L95
+	lg := pickLog(log)
 	n := len(p)
 	if n == 0 {
+		lg.Debug().Msg("red depack: empty packet")
 		return nil, ErrPktSizeZero
 	}
+	lg.Trace().Int("packet_bytes", n).Msg("red depack")
 	type redBlock struct {
 		code uint8
 		size uint8
@@ -71,5 +78,6 @@ func DepackSplitRed(p []byte) ([]MlowFrame, error) {
 	}
 	mainSize := rem - 1 // total - header_size - sum(redundant sizes)
 	frames = append(frames, MlowFrame{Data: p[cur : cur+mainSize], TimeCode: mainCode, IsMain: true})
+	lg.Debug().Int("redundant_blocks", len(red)).Int("main_bytes", mainSize).Int("total_frames", len(frames)).Msg("red depack: done")
 	return frames, nil
 }
