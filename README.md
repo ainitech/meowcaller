@@ -25,6 +25,7 @@ Core VoIP features are present:
 
 Things that are not yet implemented:
 
+- Opus codec fallback for clients not using MLOW (in progress; testing edge cases)
 - Group calls (WIP)
 - Video calls (WIP)
 - Call signalling features (raise hand, lobby, reactions)
