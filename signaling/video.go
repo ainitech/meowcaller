@@ -108,24 +108,57 @@ func BuildVideoAck(original *waBinary.Node) (waBinary.Node, bool) {
 	return waBinary.Node{Tag: "ack", Attrs: attrs}, true
 }
 
+// VideoCapabilities declares the local video capture surface on the <video> child of an
+// <offer> or <accept>. Each positive field is written as a decimal attribute; zero or
+// negative fields leave the builder default in place. A nil *VideoCapabilities keeps the
+// defaults.
+type VideoCapabilities struct {
+	// Orientation is the legacy "orientation" attribute (quarter turns, 0..3).
+	Orientation int
+	// DeviceOrientation is the "device_orientation" attribute (quarter turns, 0..3).
+	DeviceOrientation int
+	// ScreenWidth is the "screen_width" attribute: the widest frame we can handle.
+	ScreenWidth int
+	// ScreenHeight is the "screen_height" attribute: the tallest frame we can handle.
+	ScreenHeight int
+}
+
+// applyVideoCapabilities overlays every positive field of caps onto attrs.
+func applyVideoCapabilities(attrs waBinary.Attrs, caps *VideoCapabilities) waBinary.Attrs {
+	if caps == nil {
+		return attrs
+	}
+	for attr, value := range map[string]int{
+		"orientation":        caps.Orientation,
+		"device_orientation": caps.DeviceOrientation,
+		"screen_width":       caps.ScreenWidth,
+		"screen_height":      caps.ScreenHeight,
+	} {
+		if value > 0 {
+			attrs[attr] = strconv.Itoa(value)
+		}
+	}
+	return attrs
+}
+
 // videoOfferNode builds the <video> advertisement for an <offer> (sits after the
 // <audio> children, before <net>).
-func videoOfferNode() waBinary.Node {
-	return waBinary.Node{Tag: "video", Attrs: waBinary.Attrs{
+func videoOfferNode(caps *VideoCapabilities) waBinary.Node {
+	return waBinary.Node{Tag: "video", Attrs: applyVideoCapabilities(waBinary.Attrs{
 		"enc":                videoOfferEncH264,
 		"dec":                videoOfferDecH264,
 		"screen_width":       "1920",
 		"screen_height":      "1080",
 		"device_orientation": "0",
-	}}
+	}, caps)}
 }
 
 // videoAcceptNode builds the <video> advertisement for an <accept>.
-func videoAcceptNode() waBinary.Node {
-	return waBinary.Node{Tag: "video", Attrs: waBinary.Attrs{
+func videoAcceptNode(caps *VideoCapabilities) waBinary.Node {
+	return waBinary.Node{Tag: "video", Attrs: applyVideoCapabilities(waBinary.Attrs{
 		"dec":                VideoStateDecH264,
 		"device_orientation": "0",
-	}}
+	}, caps)}
 }
 
 // videoPreacceptNode advertises the callee's decoder before the final accept.

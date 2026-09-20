@@ -194,7 +194,7 @@ func BuildInitialGroupOffer(params InitialGroupOfferParams) (waBinary.Node, erro
 	}
 	children := []waBinary.Node{audioOpus("8000"), audioOpus("16000")}
 	if params.Video {
-		children = append(children, videoOfferNode())
+		children = append(children, videoOfferNode(nil))
 	}
 	children = append(children,
 		waBinary.Node{Tag: "net", Attrs: waBinary.Attrs{"medium": "3"}},
@@ -232,7 +232,7 @@ func BuildGroupInviteOffer(params GroupInviteOfferParams) (waBinary.Node, error)
 	}
 	children := []waBinary.Node{audioOpus("16000")}
 	if params.Video {
-		children = append(children, videoOfferNode())
+		children = append(children, videoOfferNode(nil))
 	}
 	children = append(children,
 		waBinary.Node{Tag: "net", Attrs: waBinary.Attrs{"medium": "2"}},

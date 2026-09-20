@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/purpshell/meowcaller/diag"
+	"github.com/purpshell/meowcaller/signaling"
 	"github.com/rs/zerolog"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
@@ -31,11 +32,28 @@ type Client struct {
 	onIncomingCall func(*Call)
 }
 
+// VideoCapabilities declares the video capture surface advertised on the <video> child of
+// an <offer> or <accept>: orientation, device_orientation, screen_width and screen_height.
+// WhatsApp reads them as a capability declaration; declaring a surface that only covers
+// landscape makes the peer stop sending frames when it rotates to portrait. Zero or
+// negative fields keep the library default.
+type VideoCapabilities = signaling.VideoCapabilities
+
 // CallOptions controls media negotiated for an outbound call.
 type CallOptions struct {
 	// Video advertises a WhatsApp video call. The caller must provide encoded H.264
 	// access units with Call.SendVideo after media is active.
 	Video bool
+	// VideoCaps overrides the <video> capability attributes of the offer. nil keeps the
+	// defaults (1920x1080, device_orientation 0). Ignored unless Video is set.
+	VideoCaps *VideoCapabilities
+}
+
+// AnswerOptions controls media negotiated when answering an inbound call.
+type AnswerOptions struct {
+	// VideoCaps overrides the <video> capability attributes of the accept. nil keeps the
+	// defaults (device_orientation 0). Ignored unless the inbound offer advertised video.
+	VideoCaps *VideoCapabilities
 }
 
 // GroupCallOptions controls media and optional chat binding for an outbound group call.

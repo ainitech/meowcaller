@@ -231,3 +231,93 @@ func TestVideoAckPreservesCompanionRouting(t *testing.T) {
 		t.Fatalf("recipient = %s, want %s", got, recipient)
 	}
 }
+
+// TestOfferVideoCapabilitiesOverlay checks that non-zero VideoCapabilities fields land as
+// decimal attributes on the offer <video> child while zero fields keep the defaults.
+func TestOfferVideoCapabilitiesOverlay(t *testing.T) {
+	peer, creator := peerJID(), creatorJID()
+	dk := OfferDeviceKey{DeviceJid: peer, Ciphertext: []byte{1}, EncType: "pkmsg"}
+	call := BuildOffer(&OfferParams{
+		CallID: "CID", To: peer, CallCreator: creator,
+		DeviceKeys: []OfferDeviceKey{dk}, Capability: CapabilityOffer, Video: true,
+		VideoCaps: &VideoCapabilities{Orientation: 1, DeviceOrientation: 3, ScreenWidth: 1080, ScreenHeight: 1920},
+	})
+	video, ok := getChild(t, contentNodes(t, call)[0], "video")
+	if !ok {
+		t.Fatal("video offer child missing")
+	}
+	for attr, want := range map[string]string{
+		"enc":                "h.264",
+		"dec":                "H264",
+		"orientation":        "1",
+		"device_orientation": "3",
+		"screen_width":       "1080",
+		"screen_height":      "1920",
+	} {
+		if got, _ := attrString(video, attr); got != want {
+			t.Errorf("video offer %s = %q, want %q", attr, got, want)
+		}
+	}
+}
+
+// TestOfferVideoCapabilitiesZeroKeepsDefaults checks that zero fields do not disturb the
+// default offer attributes and that a zero Orientation stays absent.
+func TestOfferVideoCapabilitiesZeroKeepsDefaults(t *testing.T) {
+	peer, creator := peerJID(), creatorJID()
+	dk := OfferDeviceKey{DeviceJid: peer, Ciphertext: []byte{1}, EncType: "pkmsg"}
+	for name, caps := range map[string]*VideoCapabilities{
+		"nil":      nil,
+		"empty":    {},
+		"spec":     {ScreenWidth: 1920, ScreenHeight: 1080},
+		"negative": {Orientation: -1, DeviceOrientation: -2, ScreenWidth: -1920, ScreenHeight: -1080},
+	} {
+		call := BuildOffer(&OfferParams{
+			CallID: "CID", To: peer, CallCreator: creator,
+			DeviceKeys: []OfferDeviceKey{dk}, Capability: CapabilityOffer, Video: true, VideoCaps: caps,
+		})
+		video, ok := getChild(t, contentNodes(t, call)[0], "video")
+		if !ok {
+			t.Fatalf("%s: video offer child missing", name)
+		}
+		for attr, want := range map[string]string{
+			"screen_width":       "1920",
+			"screen_height":      "1080",
+			"device_orientation": "0",
+		} {
+			if got, _ := attrString(video, attr); got != want {
+				t.Errorf("%s: video offer %s = %q, want %q", name, attr, got, want)
+			}
+		}
+		if _, has := video.Attrs["orientation"]; has {
+			t.Errorf("%s: zero Orientation must not emit the orientation attr", name)
+		}
+	}
+}
+
+// TestAcceptVideoCapabilitiesOverlay checks the accept <video> child carries the declared
+// capabilities on top of its defaults.
+func TestAcceptVideoCapabilitiesOverlay(t *testing.T) {
+	peer, creator := peerJID(), creatorJID()
+	accept := BuildAccept(&AcceptParams{
+		CallID: "CID", To: peer, CallCreator: creator,
+		AudioRates: []string{"16000"}, Video: true,
+		VideoCaps: &VideoCapabilities{ScreenWidth: 1920, ScreenHeight: 1080},
+	})
+	video, ok := getChild(t, contentNodes(t, accept)[0], "video")
+	if !ok {
+		t.Fatal("video accept child missing")
+	}
+	for attr, want := range map[string]string{
+		"dec":                "H264",
+		"device_orientation": "0",
+		"screen_width":       "1920",
+		"screen_height":      "1080",
+	} {
+		if got, _ := attrString(video, attr); got != want {
+			t.Errorf("video accept %s = %q, want %q", attr, got, want)
+		}
+	}
+	if _, has := video.Attrs["orientation"]; has {
+		t.Error("zero Orientation must not emit the orientation attr on accept")
+	}
+}

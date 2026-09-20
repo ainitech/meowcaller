@@ -54,12 +54,13 @@ type engineCall struct {
 	from    types.JID // the <call> "from" — where stanzas are addressed
 
 	direction         CallDirection
-	codec             AudioCodec   // audio codec for this call, selected from voip_settings (MLow default)
-	localVideo        bool         // this client is sending, or has requested to send, video
-	remoteVideo       bool         // the peer is sending video to this client
-	videoGate         bool         // outbound upgrade is waiting for peer acceptance
-	peerVideoUpgrade  bool         // the peer's inbound upgrade is waiting for local acceptance
-	videoTx           *videoSender // video send pipeline, live while media runs
+	codec             AudioCodec                   // audio codec for this call, selected from voip_settings (MLow default)
+	localVideo        bool                         // this client is sending, or has requested to send, video
+	videoCaps         *signaling.VideoCapabilities // <video> capability attributes for the offer/accept; nil = defaults
+	remoteVideo       bool                         // the peer is sending video to this client
+	videoGate         bool                         // outbound upgrade is waiting for peer acceptance
+	peerVideoUpgrade  bool                         // the peer's inbound upgrade is waiting for local acceptance
+	videoTx           *videoSender                 // video send pipeline, live while media runs
 	appDataTx         *appDataSender
 	rekeyPeer         func(string) error
 	group             bool
@@ -465,6 +466,7 @@ func (e *engine) placeCall(ctx context.Context, target string, opts CallOptions)
 		Capability:     signaling.CapabilityOffer,
 		DeviceIdentity: deviceIdentity,
 		Video:          opts.Video,
+		VideoCaps:      opts.VideoCaps,
 	})
 	// The builder leaves the <call> stanza id to the I/O layer; without it the server
 	// can't route/ack the offer, so it never reaches the callee.
@@ -483,6 +485,7 @@ func (e *engine) placeCall(ctx context.Context, target string, opts CallOptions)
 	m.direction = CallDirectionOutgoing
 	m.localVideo = opts.Video
 	m.remoteVideo = opts.Video
+	m.videoCaps = opts.VideoCaps
 	m.inviteSelfDevice = groupCallDevice{
 		JID: self, CapabilityVersion: 1,
 		Capability: append([]byte(nil), signaling.CapabilityOffer...),
@@ -663,7 +666,7 @@ func (e *engine) sendPreaccept(callID string, to, creator types.JID, video bool)
 // deferred until the caller's <mute_v2>, which onCallRaw fires) and brings media up. The
 // <preaccept> was already sent eagerly when the offer arrived, so Answer only commits to
 // the call. Media comes up once callKey+relay are both known.
-func (e *engine) answer(c *Call) error {
+func (e *engine) answer(c *Call, opts AnswerOptions) error {
 	m := e.lookup(c.id)
 	if m == nil {
 		return fmt.Errorf("meowcaller: unknown call %s", c.id)
@@ -683,6 +686,7 @@ func (e *engine) answer(c *Call) error {
 	}
 	e.mu.Lock()
 	m.acceptPending = true
+	m.videoCaps = opts.VideoCaps
 	e.mu.Unlock()
 
 	c.setPhase(CallPhaseConnecting)
@@ -700,6 +704,7 @@ func (e *engine) sendAccept(callID string, to, creator types.JID) {
 		return
 	}
 	isVideo := m.localVideo || m.remoteVideo
+	videoCaps := m.videoCaps
 	m.acceptPending = false
 	e.mu.Unlock()
 
@@ -708,6 +713,7 @@ func (e *engine) sendAccept(callID string, to, creator types.JID) {
 		AudioRates: []string{"16000"},
 		Metadata:   waBinary.Attrs{"peer_abtest_bucket_id_list": "125208,94276"},
 		Video:      isVideo,
+		VideoCaps:  videoCaps,
 	})
 	accept.Attrs["id"] = e.c.wa.DangerousInternals().GenerateRequestID()
 	if err := e.c.wa.DangerousInternals().SendNode(context.Background(), accept); err != nil {

@@ -46,6 +46,8 @@ type OfferParams struct {
 	Capability     []byte // nil = absent
 	DeviceIdentity []byte // nil = absent
 	Video          bool   // true = advertise <video> (video call)
+	// VideoCaps overrides the <video> capability attributes; nil keeps the defaults.
+	VideoCaps *VideoCapabilities
 }
 
 // BuildOffer builds <call to=peer><offer …>…</offer></call> with the mandatory
@@ -67,7 +69,7 @@ func BuildOffer(p *OfferParams, log ...zerolog.Logger) waBinary.Node {
 	}
 	children = append(children, audioOpus("8000"), audioOpus("16000"))
 	if p.Video {
-		children = append(children, videoOfferNode())
+		children = append(children, videoOfferNode(p.VideoCaps))
 	}
 	children = append(children, waBinary.Node{Tag: "net", Attrs: waBinary.Attrs{"medium": "3"}})
 	capability := offerCapability(p.Video, p.Capability)
@@ -121,6 +123,8 @@ type AcceptParams struct {
 	Capability   []byte         // nil = absent
 	Metadata     waBinary.Attrs // nil = absent
 	Video        bool           // true = advertise <video> (video call)
+	// VideoCaps overrides the <video> capability attributes; nil keeps the defaults.
+	VideoCaps *VideoCapabilities
 }
 
 // BuildAccept builds <accept>: audio → [video] → [te priority=2] → net medium=2 → encopt →
@@ -142,7 +146,7 @@ func BuildAccept(p *AcceptParams, log ...zerolog.Logger) waBinary.Node {
 		children = append(children, audioOpus(rate))
 	}
 	if p.Video {
-		children = append(children, videoAcceptNode())
+		children = append(children, videoAcceptNode(p.VideoCaps))
 	}
 	if p.RelayTe != nil {
 		children = append(children, waBinary.Node{Tag: "te", Attrs: waBinary.Attrs{"priority": "2"}, Content: p.RelayTe})

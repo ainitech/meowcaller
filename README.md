@@ -41,6 +41,15 @@ call, _ := client.Call(ctx, "+15551234567")
 call.Receive(meowcaller.SinkFunc(func(pcm []float32) { /* the peer's audio */ }))
 ```
 
+For video calls, declare the capture surface WhatsApp may send you. Declaring a
+large surface keeps the peer's frames flowing when they rotate to portrait:
+```go
+caps := &meowcaller.VideoCapabilities{ScreenWidth: 1920, ScreenHeight: 1080}
+call, _ := client.CallWithOptions(ctx, "+15551234567", meowcaller.CallOptions{Video: true, VideoCaps: caps})
+// and on the inbound side:
+call.AnswerWithOptions(meowcaller.AnswerOptions{VideoCaps: caps})
+```
+
 ## Features
 
 Core VoIP features are present:

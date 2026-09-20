@@ -7,6 +7,19 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
 
 ## [Unreleased]
 
+### signaling/video-capabilities — `implemented`
+
+- Added `VideoCapabilities` (orientation, device_orientation, screen_width,
+  screen_height) and exposed it as `CallOptions.VideoCaps` for outbound offers
+  and `AnswerOptions.VideoCaps` via the new `Call.AnswerWithOptions` for inbound
+  accepts. Each non-zero field is written as a decimal attribute on the
+  `<video>` child of the `<offer>`/`<accept>`; zero or negative fields and a nil pointer
+  keep the previous defaults, so existing `CallOptions{Video: true}` and
+  `Call.Answer()` call sites are unchanged. Builder tests cover the overlay,
+  the zero-field defaults, and the accept path; the portrait-rotation live
+  check (frames keep flowing while the peer holds the phone in portrait) is
+  pending on the bridge consumer.
+
 ### media/group-runtime — `KAT-verified`
 
 - Hardened live group-call teardown by closing and detaching audio endpoints,

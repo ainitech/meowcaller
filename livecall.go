@@ -274,7 +274,11 @@ func (c *Call) IsReceivingVideo() bool {
 
 // Answer accepts an inbound call (preaccept + accept) and brings media up. No-op error
 // if the call is not in a ringing state.
-func (c *Call) Answer() error { return c.eng.answer(c) }
+func (c *Call) Answer() error { return c.eng.answer(c, AnswerOptions{}) }
+
+// AnswerWithOptions accepts an inbound call like Answer, with explicit media options
+// (for example the video capabilities to declare on the <accept>).
+func (c *Call) AnswerWithOptions(opts AnswerOptions) error { return c.eng.answer(c, opts) }
 
 // Reject declines an inbound call.
 func (c *Call) Reject() error { return c.eng.reject(c) }
