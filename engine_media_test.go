@@ -223,3 +223,40 @@ func TestMediaSrtcpReceiverRekeysForAnsweringDevice(t *testing.T) {
 		t.Fatal("rekeyed SRTCP receiver rejected answering-device report")
 	}
 }
+
+func TestVideoSenderAnnouncesReceiverEstimateOnOpeningPacket(t *testing.T) {
+	callKey := iota32()
+	pipe, err := NewMediaPipeline(callKey, "111111111111111:0@lid", "222222222222222:0@lid", 0x55667788, FrameSamples)
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	var estimate rtp.ReceiverEstimate
+	estimate.Observe(0x99, 1000, 1000)
+	if estimate.Tick(2500, nil) != 300_000 {
+		t.Fatal("estimate did not open at 300000")
+	}
+	sender := &videoSender{
+		pipe:     pipe,
+		stream:   rtp.NewVideoRtpStream(0x55667788, 4500),
+		active:   true,
+		estimate: &estimate,
+	}
+	idr := append([]byte{0, 0, 0, 1, 0x65}, make([]byte, 2000)...)
+	packets := sender.protectAccessUnit(idr, 50*time.Millisecond)
+	if len(packets) < 2 {
+		t.Fatalf("got %d packets, want a fragmented access unit", len(packets))
+	}
+	for i, packet := range packets {
+		ext, ok := rtp.ParseWhatsappVideoExtension(packet)
+		if !ok {
+			t.Fatalf("packet %d extension did not parse", i)
+		}
+		wantBps := uint32(0)
+		if i == 0 {
+			wantBps = 300_000
+		}
+		if ext.ReceiverEstimateBps != wantBps {
+			t.Fatalf("packet %d receiver estimate = %d, want %d", i, ext.ReceiverEstimateBps, wantBps)
+		}
+	}
+}

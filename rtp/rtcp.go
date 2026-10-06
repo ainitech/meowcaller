@@ -151,6 +151,23 @@ func (s *RtcpReceptionStats) Observe(ssrc uint32, sequence uint16, rtpTimestamp 
 	s.hasTransit = true
 }
 
+// CumulativeLossPercent is the whole-stream loss so far, in percent, read without
+// consuming the reception-report interval.
+func (s *RtcpReceptionStats) CumulativeLossPercent() float64 {
+	// Source of truth: https://github.com/vinikjkkj/zapo/blob/87dd5b0cdd5e7e0c40b209b3bc7d47b0043d2349/packages/voip-media/src/call/WaCallMediaPlane.ts#L1725-L1742
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.hasSsrc {
+		return 0
+	}
+	expected := int64(s.sequenceCycles) + int64(s.maxSequence) - int64(s.baseSequence) + 1
+	lost := expected - int64(s.received)
+	if expected <= 0 || lost <= 0 {
+		return 0
+	}
+	return float64(lost) * 100 / float64(expected)
+}
+
 // ObserveSenderReport records the compact NTP timestamp needed for LSR/DLSR.
 func (s *RtcpReceptionStats) ObserveSenderReport(senderSsrc, ntpSeconds, ntpFraction uint32, arrivalMs uint64) {
 	s.mu.Lock()

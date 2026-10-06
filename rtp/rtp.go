@@ -106,6 +106,15 @@ func EstimateSrtpRtpWireBytes(opusPayload []byte) int {
 	return headerSize + len(opusPayload) + tagLen
 }
 
+// FastRembExtensionID is the one-byte-header id of the receive bandwidth estimate
+// element WhatsApp carries inside video RTP (observed on the wire; not negotiated).
+const FastRembExtensionID = 13
+
+// fastRembPresenceEstimate is the presence bitmap bit for the estimate field.
+const fastRembPresenceEstimate = 0x01
+
+const fastRembMaxBps = 0xff_ffff
+
 // VideoRtpExtension is WhatsApp's video RTP metadata extension set.
 type VideoRtpExtension struct {
 	MediaFrameInfo    uint8
@@ -113,6 +122,9 @@ type VideoRtpExtension struct {
 	InitialBandwidth  uint16
 	ShortOffset       int16
 	TransportSequence uint16
+	// ReceiverEstimateBps is the receive bandwidth estimate announced to the peer in
+	// the id-13 element; 0 omits the element.
+	ReceiverEstimateBps uint32
 }
 
 // DisplayOrientation returns the CVO receiver rotation as clockwise quarter turns.
@@ -137,10 +149,24 @@ func (e *VideoRtpExtension) encode() []byte {
 	ext = binary.BigEndian.AppendUint16(ext, uint16(e.ShortOffset))
 	ext = append(ext, 0x91)
 	ext = binary.BigEndian.AppendUint16(ext, e.TransportSequence)
+	if e.ReceiverEstimateBps > 0 {
+		ext = appendFastRemb(ext, e.ReceiverEstimateBps)
+	}
 	for len(ext)%4 != 0 {
 		ext = append(ext, 0)
 	}
 	return ext
+}
+
+// appendFastRemb appends the id-13 element: id/len byte, presence bitmap, and the
+// estimate as a plain 24-bit big-endian integer, saturated at 2^24-1.
+func appendFastRemb(ext []byte, bps uint32) []byte {
+	// Source of truth: https://github.com/vinikjkkj/zapo/blob/87dd5b0cdd5e7e0c40b209b3bc7d47b0043d2349/packages/voip-media/src/media/fast-remb.ts#L52-L140
+	if bps > fastRembMaxBps {
+		bps = fastRembMaxBps
+	}
+	ext = append(ext, FastRembExtensionID<<4|(4-1), fastRembPresenceEstimate)
+	return append(ext, byte(bps>>16), byte(bps>>8), byte(bps))
 }
 
 // RtpHeader is the fixed RTP header plus an optional 0xdebe extension.
@@ -271,6 +297,11 @@ func ParseWhatsappVideoExtension(data []byte) (*VideoRtpExtension, bool) {
 				return nil, false
 			}
 			parsed.TransportSequence = binary.BigEndian.Uint16(value)
+		case FastRembExtensionID:
+			// Source of truth: https://github.com/vinikjkkj/zapo/blob/87dd5b0cdd5e7e0c40b209b3bc7d47b0043d2349/packages/voip-media/src/media/fast-remb.ts#L67-L83
+			if length >= 4 && value[0]&fastRembPresenceEstimate != 0 {
+				parsed.ReceiverEstimateBps = uint32(value[1])<<16 | uint32(value[2])<<8 | uint32(value[3])
+			}
 		}
 	}
 	if !hasFrameInfo || !hasShortOffset {
@@ -371,6 +402,7 @@ type VideoRtpStream struct {
 	transportSequence uint16
 	frameNumber       uint16
 	firstPacket       bool
+	receiverEstimate  uint32
 }
 
 func NewVideoRtpStream(ssrc, tsStride uint32) *VideoRtpStream {
@@ -384,6 +416,13 @@ func (s *VideoRtpStream) RtpTimestamp() uint32 {
 	return s.timestamp
 }
 
+// SetReceiverEstimate sets the receive bandwidth estimate the next access units
+// announce on their opening packet; 0 stops announcing.
+func (s *VideoRtpStream) SetReceiverEstimate(bps uint32) {
+	// Source of truth: https://github.com/vinikjkkj/zapo/blob/87dd5b0cdd5e7e0c40b209b3bc7d47b0043d2349/packages/voip-media/src/call/WaCallMediaPlane.ts#L807-L812
+	s.receiverEstimate = bps
+}
+
 func (s *VideoRtpStream) SetTimestampStride(tsStride uint32) bool {
 	if tsStride == 0 {
 		return false
@@ -394,16 +433,19 @@ func (s *VideoRtpStream) SetTimestampStride(tsStride uint32) bool {
 
 func (s *VideoRtpStream) NextPacket(lastInAccessUnit bool, mediaFrameInfo uint8) RtpHeader {
 	var frameNumber *uint16
+	var receiverEstimate uint32
 	if s.firstPacket {
 		value := s.frameNumber
 		frameNumber = &value
+		receiverEstimate = s.receiverEstimate
 	}
 	ext := &VideoRtpExtension{
-		MediaFrameInfo:    mediaFrameInfo,
-		FrameNumber:       frameNumber,
-		InitialBandwidth:  0,
-		ShortOffset:       0,
-		TransportSequence: s.transportSequence,
+		MediaFrameInfo:      mediaFrameInfo,
+		FrameNumber:         frameNumber,
+		InitialBandwidth:    0,
+		ShortOffset:         0,
+		TransportSequence:   s.transportSequence,
+		ReceiverEstimateBps: receiverEstimate,
 	}
 	header := RtpHeader{
 		Marker:         lastInAccessUnit,

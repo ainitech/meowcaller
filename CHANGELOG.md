@@ -7,6 +7,23 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
 
 ## [Unreleased]
 
+### rtp/receiver-estimate — `KAT-verified` (wire element); estimator `implemented`
+
+- Video RTP now announces a receive bandwidth estimate in the id-13 header
+  extension element (presence bitmap `0x01` + 24-bit big-endian bps) on the
+  opening packet of each access unit. WhatsApp reads this in-stream element for
+  video rate control rather than REMB over RTCP; without it zapo measured the
+  peer clamped to ~28 kbps / 0.8 fps with no key frame. The element bytes are
+  KAT-verified against zapo's captured vector (`d3 01 01 ae 9e` for 110,238 bps)
+  and the parser reads the official client's 9-byte content.
+- Added `NextReceiverMaxBitrate` and `ReceiverEstimate`: a ceiling carried across
+  RTCP-ticker windows (300 kbps initial, x1.5 while cumulative loss < 2 %, hold
+  between 2 and 10 %, x0.85 anchored to the lower of ceiling and measurement
+  above, 64 kbps floor, 2 Mbps cap), fed by inbound video payload octets and
+  `RtcpReceptionStats.CumulativeLossPercent`, which reads loss without
+  consuming the sender-report interval. Band constants are zapo's; carried as an
+  `// ASSUMPTION` pending a meowcaller capture.
+
 ### signaling/relaylatency — `implemented`
 
 - The callee's `<relaylatency>` answer now covers only the relay this client

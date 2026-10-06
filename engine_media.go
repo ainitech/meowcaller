@@ -652,10 +652,11 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 	if err = audioReceivers.attachSRTCPSender(videoRtcp); err != nil {
 		return fmt.Errorf("attach video SRTCP sender: %w", err)
 	}
+	var videoEstimate rtp.ReceiverEstimate
 	vsender := &videoSender{
 		pipe: txVideoPipe, stream: rtp.NewVideoRtpStream(videoSelfSsrc, defaultVideoRtpStepSamples),
 		ch: ch, ssrc: videoSelfSsrc, callID: callID, keyframeRequired: true,
-		log: log, diag: e.c.diag,
+		estimate: &videoEstimate, log: log, diag: e.c.diag,
 	}
 	txAppDataPipe, err := NewMediaPipeline(callKey, selfLID, peerLID, appDataSelfSsrc, FrameSamples, WithLogger(log))
 	if err != nil {
@@ -771,6 +772,9 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 				)
 				if err != nil {
 					return
+				}
+				if ceiling := videoEstimate.Tick(nowMs, videoReception.CumulativeLossPercent); ceiling > 0 {
+					e.c.diag.Emit("video", map[string]any{"event": "receiver_estimate", "bps": ceiling})
 				}
 				videoStats := txVideoPipe.SenderStats()
 				if videoStats.PacketsSent > 0 {
@@ -980,6 +984,7 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 				videoReceiveStates[media.receiver] = videoState
 			}
 			videoReception.Observe(vh.Ssrc, vh.SequenceNumber, vh.Timestamp, uint64(time.Now().UnixMilli()), 90000)
+			videoEstimate.Observe(vh.Ssrc, len(media.Payload), uint64(time.Now().UnixMilli()))
 			if vh.VideoExtension != nil {
 				orientation := vh.VideoExtension.DisplayOrientation()
 				if orientation != videoState.orientation {
@@ -1289,6 +1294,7 @@ type videoSender struct {
 	active           bool
 	sendGated        bool
 	keyframeRequired bool
+	estimate         *rtp.ReceiverEstimate // inbound video bandwidth ceiling announced on each access unit; nil = none
 	log              zerolog.Logger
 	diag             *diag.Recorder
 }
@@ -1443,6 +1449,9 @@ func (vs *videoSender) protectAccessUnitLocked(au []byte, duration time.Duration
 		})
 	}
 	vs.stream.SetTimestampStride(videoRtpDurationSamples(duration))
+	if vs.estimate != nil {
+		vs.stream.SetReceiverEstimate(vs.estimate.Ceiling())
+	}
 	mediaFrameInfo := rtp.VideoMediaFrameInfoDelta
 	if idr {
 		mediaFrameInfo = rtp.VideoMediaFrameInfoIDR
