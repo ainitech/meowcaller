@@ -42,3 +42,29 @@ func TestParseVoipSettingsOpus(t *testing.T) {
 		t.Error("UseMlowCodecV1 = true, want false")
 	}
 }
+
+// TestParseVoipSettingsRtcpKeys pins the server RTCP cadence from the captured sample and
+// the video REMB gate from an inline vid_rc section.
+func TestParseVoipSettingsRtcpKeys(t *testing.T) {
+	raw, err := os.ReadFile("testdata/voip_settings_sample.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	vs, err := ParseVoipSettings(raw)
+	if err != nil {
+		t.Fatalf("ParseVoipSettings: %v", err)
+	}
+	if vs.RtcpIntervalMs != 1500 {
+		t.Errorf("RtcpIntervalMs = %d, want 1500 (sample rc.rtcp_interval_ms)", vs.RtcpIntervalMs)
+	}
+	if vs.DisableRtcpRemb {
+		t.Error("DisableRtcpRemb = true, want false (sample has no vid_rc)")
+	}
+	vs, err = ParseVoipSettings([]byte(`{"vid_rc":{"disable_rtcp_remb":"1"},"rc":{"rtcp_interval_ms":"1000"}}`))
+	if err != nil {
+		t.Fatalf("ParseVoipSettings: %v", err)
+	}
+	if !vs.DisableRtcpRemb || vs.RtcpIntervalMs != 1000 {
+		t.Errorf("got disable_rtcp_remb=%v interval=%d, want true/1000", vs.DisableRtcpRemb, vs.RtcpIntervalMs)
+	}
+}

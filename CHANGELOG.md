@@ -7,6 +7,14 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
 
 ## [Unreleased]
 
+### signaling/voip_settings — `KAT-verified`
+
+- `ParseVoipSettings` now reads `rc.rtcp_interval_ms` and
+  `vid_rc.disable_rtcp_remb`. The SRTCP sender-report ticker follows the
+  server's interval (1.5 s compiled default, reset mid-call when a later
+  profile changes it) and the REMB gate is recorded on the call. The captured
+  sample pins `rtcp_interval_ms=1500`.
+
 ### rtp/receiver-estimate — `KAT-verified` (wire element); estimator `implemented`
 
 - Video RTP now announces a receive bandwidth estimate in the id-13 header

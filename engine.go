@@ -55,6 +55,8 @@ type engineCall struct {
 
 	direction         CallDirection
 	codec             AudioCodec                   // audio codec for this call, selected from voip_settings (MLow default)
+	rtcpIntervalMs    int                          // server RTCP cadence from voip_settings; 0 = compiled default
+	rtcpRembDisabled  bool                         // server turned REMB over RTCP off (voip_settings vid_rc.disable_rtcp_remb)
 	localVideo        bool                         // this client is sending, or has requested to send, video
 	videoCaps         *signaling.VideoCapabilities // <video> capability attributes for the offer/accept; nil = defaults
 	remoteVideo       bool                         // the peer is sending video to this client
@@ -1024,11 +1026,16 @@ func (e *engine) applyVoipSettingsCodec(m *engineCall, node *waBinary.Node, call
 		return
 	}
 	m.codec = selectAudioCodec(vs)
+	// Source of truth: https://github.com/vinikjkkj/zapo/blob/87dd5b0cdd5e7e0c40b209b3bc7d47b0043d2349/packages/voip-media/src/call/WaCallMediaPlane.ts#L613-L627
+	m.rtcpIntervalMs = vs.RtcpIntervalMs
+	m.rtcpRembDisabled = vs.DisableRtcpRemb
 	e.c.log.Info().
 		Str("call_id", callID).
 		Str("codec", m.codec.String()).
 		Bool("use_mlow_codec_v1", vs.UseMlowCodecV1).
-		Msg("selected audio codec from voip_settings")
+		Int("rtcp_interval_ms", vs.RtcpIntervalMs).
+		Bool("disable_rtcp_remb", vs.DisableRtcpRemb).
+		Msg("applied voip_settings")
 }
 
 // onCallAck handles an <ack class="call"> node. For an outbound offer the relay

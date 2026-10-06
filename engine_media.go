@@ -674,10 +674,14 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 		}
 		return ch.Send(packet)
 	})
+	rtcpIntervalMs := defaultRtcpIntervalMs
 	e.mu.Lock()
 	if m := e.calls[callID]; m != nil {
 		vsender.active = m.localVideo
 		vsender.sendGated = m.videoGate
+		if m.rtcpIntervalMs > 0 {
+			rtcpIntervalMs = m.rtcpIntervalMs
+		}
 		m.videoTx = vsender
 		m.appDataTx = appSender
 	}
@@ -739,7 +743,7 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 	// SR+SDES packets are required for the caller's video to start flowing to the
 	// answerer, and give the peer a target for PLI/FIR recovery feedback.
 	go func() {
-		ticker := time.NewTicker(1500 * time.Millisecond)
+		ticker := time.NewTicker(time.Duration(rtcpIntervalMs) * time.Millisecond)
 		defer ticker.Stop()
 		var sent uint64
 		for {
@@ -752,6 +756,11 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 				current := e.calls[callID]
 				if current != nil && current.group {
 					groupMode.Store(true)
+				}
+				// Source of truth: https://github.com/vinikjkkj/zapo/blob/87dd5b0cdd5e7e0c40b209b3bc7d47b0043d2349/packages/voip-media/src/call/WaCallMediaPlane.ts#L613-L627
+				if current != nil && current.rtcpIntervalMs > 0 && current.rtcpIntervalMs != rtcpIntervalMs {
+					rtcpIntervalMs = current.rtcpIntervalMs
+					ticker.Reset(time.Duration(rtcpIntervalMs) * time.Millisecond)
 				}
 				e.mu.Unlock()
 				if groupMode.Load() {
@@ -1298,6 +1307,9 @@ type videoSender struct {
 	log              zerolog.Logger
 	diag             *diag.Recorder
 }
+
+// defaultRtcpIntervalMs is the sender-report cadence when voip_settings names none.
+const defaultRtcpIntervalMs = 1500
 
 type mediaSrtcpSender struct {
 	mu      sync.Mutex
