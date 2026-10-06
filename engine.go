@@ -793,7 +793,8 @@ func (e *engine) onRelay(callID string, data *waBinary.Node) {
 }
 
 // onRelayLatency answers the caller's relaylatency probes (the callee's half of the
-// relay election). It does NOT send the accept — that is deferred until <mute_v2>.
+// relay election) for the one relay this client dials. It does NOT send the accept —
+// that is deferred until <mute_v2>.
 func (e *engine) onRelayLatency(ev *events.CallRelayLatency) {
 	m := e.lookup(ev.CallID)
 	if m == nil || m.direction != CallDirectionIncoming {
@@ -803,18 +804,13 @@ func (e *engine) onRelayLatency(ev *events.CallRelayLatency) {
 	if rl == nil {
 		return
 	}
-	var probes []rlProbe
-	for i := range rl.GetChildren() {
-		te := &rl.GetChildren()[i]
-		if te.Tag != "te" {
-			continue
-		}
-		ag := te.AttrGetter()
-		probes = append(probes, rlProbe{
-			latency:   decodeLatency(ag.String("latency")),
-			relayName: ag.String("relay_name"),
-			addr:      nodeBytes(te),
-		})
+	e.mu.Lock()
+	rd := m.relay
+	e.mu.Unlock()
+	probes := relayLatencyAnswers(rl, rd, true)
+	if len(probes) == 0 {
+		e.c.log.Debug().Str("call_id", ev.CallID).Msg("relaylatency names no relay this client dials; not answering")
+		return
 	}
 	for _, p := range probes {
 		resp := signaling.BuildRelayLatency(&signaling.RelayLatencyParams{
@@ -985,6 +981,31 @@ type rlProbe struct {
 	latency   uint32
 	relayName string
 	addr      []byte
+}
+
+// relayLatencyAnswers builds the <te> answers for an inbound <relaylatency>: one per peer
+// probe that names the relay this client dials, carrying our own c2r_rtt and endpoint
+// bytes. Probes for relays we are not on are dropped, so the caller cannot elect one.
+func relayLatencyAnswers(rl *waBinary.Node, rd *relayData, inbound bool) []rlProbe {
+	// Source of truth: https://github.com/vinikjkkj/zapo/blob/87dd5b0cdd5e7e0c40b209b3bc7d47b0043d2349/packages/voip/src/call/WaCallMediaSession.ts#L1103-L1128
+	if rl == nil || rd == nil {
+		return nil
+	}
+	ep := getMediaRelayEndpoint(rd, inbound)
+	if ep == nil || ep.relayName == "" || len(ep.addrBytes) == 0 {
+		return nil
+	}
+	var answers []rlProbe
+	kids := rl.GetChildren()
+	for i := range kids {
+		te := &kids[i]
+		if te.Tag != "te" || te.AttrGetter().String("relay_name") != ep.relayName {
+			continue
+		}
+		answers = append(answers, rlProbe{latency: ep.c2rRTTMs, relayName: ep.relayName, addr: ep.addrBytes})
+		break
+	}
+	return answers
 }
 
 // applyVoipSettingsCodec finds the <voip_settings> blob under node (an inbound
@@ -1511,6 +1532,8 @@ type relayEndpoint struct {
 	tokenID     uint32
 	authTokenID uint32
 	isFNA       bool
+	c2rRTTMs    uint32 // server-measured client-to-relay RTT (<te2 c2r_rtt>), 0 when absent
+	addrBytes   []byte // raw 6-byte IPv4:port te2 content, echoed verbatim in relaylatency
 	addresses   []relayAddress
 }
 
@@ -1574,15 +1597,6 @@ func findChild(n *waBinary.Node, tag string) *waBinary.Node {
 		}
 	}
 	return nil
-}
-
-// decodeLatency reverses the relay-latency wire encoding (0x2000000 + rttMs).
-func decodeLatency(enc string) uint32 {
-	v, err := strconv.ParseUint(enc, 10, 32)
-	if err != nil || v < 0x0200_0000 {
-		return 0
-	}
-	return uint32(v) - 0x0200_0000
 }
 
 func attrUint(n *waBinary.Node, key string) uint32 {
@@ -1650,6 +1664,8 @@ func parseRelayData(node *waBinary.Node) *relayData {
 			tokenID:     attrUint(child, "token_id"),
 			authTokenID: attrUint(child, "auth_token_id"),
 			isFNA:       child.AttrGetter().String("is_fna") == "1",
+			c2rRTTMs:    attrUint(child, "c2r_rtt"),
+			addrBytes:   append([]byte(nil), ab...),
 			addresses: []relayAddress{{
 				ipv4: fmt.Sprintf("%d.%d.%d.%d", ab[0], ab[1], ab[2], ab[3]),
 				port: binary.BigEndian.Uint16(ab[4:6]),

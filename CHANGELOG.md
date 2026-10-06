@@ -7,6 +7,15 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
 
 ## [Unreleased]
 
+### signaling/relaylatency — `implemented`
+
+- The callee's `<relaylatency>` answer now covers only the relay this client
+  dials, carrying the server-measured `c2r_rtt` of that `te2` endpoint and its
+  own address bytes. Probes naming relays we are not on get no answer. Before,
+  every peer `<te>` was echoed verbatim (the peer's latency, name and address),
+  so the caller could elect a relay this side never joined and the call went
+  one-way. Unit tests cover the dialed-relay answer and the no-answer cases.
+
 ### signaling/video-capabilities — `implemented`
 
 - Added `VideoCapabilities` (orientation, device_orientation, screen_width,
