@@ -260,3 +260,61 @@ func TestVideoSenderAnnouncesReceiverEstimateOnOpeningPacket(t *testing.T) {
 		}
 	}
 }
+
+func TestVideoSenderHoldDropsFramesUntilReleased(t *testing.T) {
+	callKey := iota32()
+	pipe, err := NewMediaPipeline(callKey, "111111111111111:0@lid", "222222222222222:0@lid", 0x55667788, FrameSamples)
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	now := time.Unix(1_000, 0)
+	sender := &videoSender{
+		pipe:   pipe,
+		stream: rtp.NewVideoRtpStream(0x55667788, 4500),
+		active: true,
+		now:    func() time.Time { return now },
+	}
+	idr := []byte{0, 0, 0, 1, 0x65, 1, 2, 3}
+	delta := []byte{0, 0, 0, 1, 0x41, 1, 2, 3}
+
+	sender.holdFor(videoStartHoldMax)
+	if packets := sender.protectAccessUnit(idr, 50*time.Millisecond); len(packets) != 0 {
+		t.Fatalf("held sender emitted %d packets", len(packets))
+	}
+	now = now.Add(1000 * time.Millisecond)
+	if packets := sender.protectAccessUnit(idr, 50*time.Millisecond); len(packets) != 0 {
+		t.Fatalf("sender emitted %d packets before the hold expired", len(packets))
+	}
+	sender.releaseHoldIn(videoStartHoldAfterPeerMute)
+	now = now.Add(100 * time.Millisecond)
+	if packets := sender.protectAccessUnit(idr, 50*time.Millisecond); len(packets) != 0 {
+		t.Fatalf("sender emitted %d packets inside the 150 ms release window", len(packets))
+	}
+	now = now.Add(100 * time.Millisecond)
+	if packets := sender.protectAccessUnit(delta, 50*time.Millisecond); len(packets) != 0 {
+		t.Fatalf("released sender emitted a dependent frame before a key frame")
+	}
+	if packets := sender.protectAccessUnit(idr, 50*time.Millisecond); len(packets) != 1 {
+		t.Fatalf("released sender emitted %d packets for the key frame, want 1", len(packets))
+	}
+
+	sender.releaseHoldIn(videoStartHoldAfterPeerMute)
+	if packets := sender.protectAccessUnit(delta, 50*time.Millisecond); len(packets) != 1 {
+		t.Fatalf("a release with no hold active created one: %d packets", len(packets))
+	}
+}
+
+func TestVideoSenderHoldNeverExtends(t *testing.T) {
+	now := time.Unix(1_000, 0)
+	sender := &videoSender{now: func() time.Time { return now }}
+	sender.holdFor(videoUpgradeHoldMax)
+	sender.releaseHoldIn(videoUpgradeHoldAfterPeerEnabled)
+	want := now.Add(videoUpgradeHoldAfterPeerEnabled)
+	if !sender.holdUntil.Equal(want) {
+		t.Fatalf("holdUntil = %v, want %v", sender.holdUntil, want)
+	}
+	sender.releaseHoldIn(10 * time.Second)
+	if !sender.holdUntil.Equal(want) {
+		t.Fatalf("a longer release extended the hold to %v", sender.holdUntil)
+	}
+}

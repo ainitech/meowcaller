@@ -7,6 +7,18 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
 
 ## [Unreleased]
 
+### media/video-send-hold — `implemented`
+
+- Outbound video now waits for the peer to be ready before the first packet
+  leaves: on a call that is video from the start, until the peer's first
+  `<mute_v2>` plus 150 ms (two seconds at most, re-armed at the peer's accept
+  on the caller side); on an upgrade the peer asked for, until its
+  `<video state=1>` plus 300 ms (three seconds at most). Frames are dropped
+  while held and the stream reopens on a key frame. zapo measured that a first
+  video packet arriving before WhatsApp Web has created the inbound stream
+  drags the whole call along on key frames alone. Unit tests cover the hold,
+  the release windows, the never-extend rule and both upgrade entry points.
+
 ### signaling/voip_settings — `KAT-verified`
 
 - `ParseVoipSettings` now reads `rc.rtcp_interval_ms` and

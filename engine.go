@@ -57,6 +57,8 @@ type engineCall struct {
 	codec             AudioCodec                   // audio codec for this call, selected from voip_settings (MLow default)
 	rtcpIntervalMs    int                          // server RTCP cadence from voip_settings; 0 = compiled default
 	rtcpRembDisabled  bool                         // server turned REMB over RTCP off (voip_settings vid_rc.disable_rtcp_remb)
+	peerMuteSeen      bool                         // the peer's first <mute_v2> arrived (it is ready to receive video)
+	peerVideoPending  bool                         // we accepted the peer's upgrade; its <video state=1> is still to come
 	localVideo        bool                         // this client is sending, or has requested to send, video
 	videoCaps         *signaling.VideoCapabilities // <video> capability attributes for the offer/accept; nil = defaults
 	remoteVideo       bool                         // the peer is sending video to this client
@@ -277,6 +279,7 @@ func (e *engine) transitionVideo(callID string, transition int) error {
 			return errors.New("meowcaller: no pending peer video upgrade")
 		}
 		m.peerVideoUpgrade = false
+		m.peerVideoPending = true
 	case signaling.VideoStateStopped:
 		m.localVideo = false
 		m.videoGate = false
@@ -286,10 +289,13 @@ func (e *engine) transitionVideo(callID string, transition int) error {
 	}
 	e.mu.Unlock()
 	if sender != nil {
-		if transition == signaling.VideoStateStopped {
+		switch {
+		case transition == signaling.VideoStateStopped:
 			sender.disable()
-		} else if transition == signaling.VideoStateUpgradeRequestV2 {
+		case transition == signaling.VideoStateUpgradeRequestV2:
 			sender.enable(true)
+		case transition == signaling.VideoStateUpgradeAccept && localVideoActive:
+			sender.holdFor(videoUpgradeHoldMax)
 		}
 	}
 
@@ -329,6 +335,7 @@ func (e *engine) transitionVideo(callID string, transition int) error {
 	if current := e.calls[callID]; current == m {
 		if transition == signaling.VideoStateUpgradeAccept {
 			current.peerVideoUpgrade = true
+			current.peerVideoPending = false
 		} else {
 			current.localVideo = false
 			current.videoGate = false
@@ -352,11 +359,15 @@ func (e *engine) setVideoEnabled(callID string, enabled bool) error {
 	m.localVideo = enabled
 	m.videoGate = false
 	to, creator, sender := m.from, m.creator, m.videoTx
+	peerVideoPending := m.peerVideoPending
 	e.mu.Unlock()
 
 	if sender != nil {
 		if enabled {
 			sender.enable(false)
+			if peerVideoPending {
+				sender.holdFor(videoUpgradeHoldMax)
+			}
 		} else {
 			sender.disable()
 		}
@@ -911,6 +922,15 @@ func (e *engine) onAccept(ev *events.CallAccept) {
 	if m.call != nil {
 		m.call.markPeerAccepted()
 	}
+	e.mu.Lock()
+	var holdSender *videoSender
+	if current := e.calls[ev.CallID]; current != nil && current.localVideo && !current.videoGate && !current.peerMuteSeen {
+		holdSender = current.videoTx
+	}
+	e.mu.Unlock()
+	if holdSender != nil {
+		holdSender.holdFor(videoStartHoldMax)
+	}
 	e.c.log.Info().
 		Str("call_id", ev.CallID).
 		Str("from", ev.From.String()).
@@ -1120,7 +1140,15 @@ func (e *engine) onCallRaw(callNode *waBinary.Node) bool {
 		e.mu.Lock()
 		m := e.calls[callID]
 		pending := m != nil && m.acceptPending
+		var holdSender *videoSender
+		if m != nil && !m.peerMuteSeen {
+			m.peerMuteSeen = true
+			holdSender = m.videoTx
+		}
 		e.mu.Unlock()
+		if holdSender != nil {
+			holdSender.releaseHoldIn(videoStartHoldAfterPeerMute)
+		}
 		if m != nil && m.call != nil {
 			if fn := m.call.onMuteStateFn(); fn != nil {
 				fn(muted)
@@ -1193,11 +1221,14 @@ func (e *engine) onVideoStanza(v *waBinary.Node) {
 	disableSender := false
 	enableSender := false
 	announceEnabled := false
+	releaseHold := false
 	switch state {
 	case signaling.VideoStateUpgradeRequest, signaling.VideoStateUpgradeRequestV2:
 		m.peerVideoUpgrade = true
 	case signaling.VideoStateEnabled:
 		m.remoteVideo = true
+		releaseHold = m.peerVideoPending
+		m.peerVideoPending = false
 		if m.localVideo && m.videoGate {
 			m.videoGate = false
 			enableSender = true
@@ -1240,6 +1271,9 @@ func (e *engine) onVideoStanza(v *waBinary.Node) {
 			enableSender = true
 			requestKeyframe = true
 		}
+	}
+	if sender != nil && releaseHold {
+		sender.releaseHoldIn(videoUpgradeHoldAfterPeerEnabled)
 	}
 	if sender != nil {
 		if enableSender {

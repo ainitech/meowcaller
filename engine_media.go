@@ -679,6 +679,12 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 	if m := e.calls[callID]; m != nil {
 		vsender.active = m.localVideo
 		vsender.sendGated = m.videoGate
+		if m.localVideo && !m.videoGate {
+			vsender.holdFor(videoStartHoldMax)
+			if m.peerMuteSeen {
+				vsender.releaseHoldIn(videoStartHoldAfterPeerMute)
+			}
+		}
 		if m.rtcpIntervalMs > 0 {
 			rtcpIntervalMs = m.rtcpIntervalMs
 		}
@@ -1304,12 +1310,53 @@ type videoSender struct {
 	sendGated        bool
 	keyframeRequired bool
 	estimate         *rtp.ReceiverEstimate // inbound video bandwidth ceiling announced on each access unit; nil = none
+	holdUntil        time.Time             // frames are dropped until this instant (zero = no hold)
+	now              func() time.Time      // clock for the hold; nil = time.Now
 	log              zerolog.Logger
 	diag             *diag.Recorder
 }
 
+// Video send hold: our first video packet must not reach the peer before it has created
+// the inbound stream for it, or the call runs on key frames alone.
+const (
+	videoStartHoldMax                = 2 * time.Second
+	videoStartHoldAfterPeerMute      = 150 * time.Millisecond
+	videoUpgradeHoldMax              = 3 * time.Second
+	videoUpgradeHoldAfterPeerEnabled = 300 * time.Millisecond
+)
+
 // defaultRtcpIntervalMs is the sender-report cadence when voip_settings names none.
 const defaultRtcpIntervalMs = 1500
+
+func (vs *videoSender) clock() time.Time {
+	if vs.now != nil {
+		return vs.now()
+	}
+	return time.Now()
+}
+
+// holdFor drops outbound frames for at most max, then resumes on the next key frame.
+func (vs *videoSender) holdFor(max time.Duration) {
+	// Source of truth: https://github.com/vinikjkkj/zapo/commit/999bd439f8d7ffb1962604dc0f57b9c9a379d26a
+	vs.mu.Lock()
+	vs.holdUntil = vs.clock().Add(max)
+	vs.keyframeRequired = true
+	vs.mu.Unlock()
+}
+
+// releaseHoldIn shortens an active hold so it ends after d; a longer hold is never
+// extended and no hold is created.
+func (vs *videoSender) releaseHoldIn(d time.Duration) {
+	// Source of truth: https://github.com/vinikjkkj/zapo/commit/999bd439f8d7ffb1962604dc0f57b9c9a379d26a
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
+	if vs.holdUntil.IsZero() {
+		return
+	}
+	if release := vs.clock().Add(d); release.Before(vs.holdUntil) {
+		vs.holdUntil = release
+	}
+}
 
 type mediaSrtcpSender struct {
 	mu      sync.Mutex
@@ -1431,6 +1478,12 @@ func (vs *videoSender) protectAccessUnit(au []byte, duration time.Duration) [][]
 func (vs *videoSender) protectAccessUnitLocked(au []byte, duration time.Duration) [][]byte {
 	if !vs.active || vs.sendGated {
 		return nil
+	}
+	if !vs.holdUntil.IsZero() {
+		if vs.clock().Before(vs.holdUntil) {
+			return nil
+		}
+		vs.holdUntil = time.Time{}
 	}
 	idr := rtp.AUHasIDR(au)
 	if vs.keyframeRequired && !idr {

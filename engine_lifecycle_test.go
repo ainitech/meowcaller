@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/purpshell/meowcaller/signaling"
 	waBinary "go.mau.fi/whatsmeow/binary"
@@ -581,5 +582,54 @@ func TestFinishCallClosesAttachedAudioDevices(t *testing.T) {
 	}
 	if sink.closeCount != 1 {
 		t.Fatalf("audio sink close count = %d, want 1", sink.closeCount)
+	}
+}
+
+func TestAcceptingPeerUpgradeHoldsVideoUntilPeerEnabled(t *testing.T) {
+	eng, call := testEngineWithOutgoingCall()
+	eng.sendCallNode = func(context.Context, waBinary.Node) error { return nil }
+	now := time.Unix(1_000, 0)
+	sender := &videoSender{active: true, now: func() time.Time { return now }}
+	m := eng.calls[call.id]
+	m.videoTx = sender
+	m.peerVideoUpgrade = true
+
+	if err := eng.transitionVideo(call.id, signaling.VideoStateUpgradeAccept); err != nil {
+		t.Fatalf("accept upgrade: %v", err)
+	}
+	if !m.peerVideoPending {
+		t.Fatal("accepting the peer's upgrade must wait for its state=1")
+	}
+	if want := now.Add(videoUpgradeHoldMax); !sender.holdUntil.Equal(want) {
+		t.Fatalf("holdUntil = %v, want %v", sender.holdUntil, want)
+	}
+
+	eng.onVideoStanza(videoStateNode(signaling.VideoStateEnabled))
+	if m.peerVideoPending {
+		t.Fatal("peer state=1 must clear the pending upgrade")
+	}
+	if want := now.Add(videoUpgradeHoldAfterPeerEnabled); !sender.holdUntil.Equal(want) {
+		t.Fatalf("holdUntil after peer enabled = %v, want %v", sender.holdUntil, want)
+	}
+}
+
+func TestEnablingVideoAfterAcceptingPeerUpgradeHolds(t *testing.T) {
+	eng, call := testEngineWithOutgoingCall()
+	eng.sendCallNode = func(context.Context, waBinary.Node) error { return nil }
+	now := time.Unix(1_000, 0)
+	sender := &videoSender{now: func() time.Time { return now }}
+	m := eng.calls[call.id]
+	m.videoTx = sender
+	m.localVideo = false
+	m.peerVideoPending = true
+
+	if err := eng.setVideoEnabled(call.id, true); err != nil {
+		t.Fatalf("enable video: %v", err)
+	}
+	if active, _ := senderVideoState(sender); !active {
+		t.Fatal("sender not enabled")
+	}
+	if want := now.Add(videoUpgradeHoldMax); !sender.holdUntil.Equal(want) {
+		t.Fatalf("holdUntil = %v, want %v", sender.holdUntil, want)
 	}
 }
