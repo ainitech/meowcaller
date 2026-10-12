@@ -55,6 +55,38 @@ func NextReceiverMaxBitrate(previous uint32, octets uint64, elapsedMs uint64, lo
 	return uint32(next)
 }
 
+const (
+	audioReceiverEstimateInitialBps = 24_000
+	audioReceiverEstimateMinBps     = 16_000
+	audioReceiverEstimateMaxBps     = 30_000
+	audioReceiverEstimateGrowth     = 1.1
+)
+
+// NextAudioReceiverEstimate returns the next audio REMB ceiling: 24 kbps first, 10 % up per
+// interval under 2 % loss to 30 kbps, held up to 10 %, 15 % down above, never below 16 kbps.
+// The peer's audio quality controller leaves its probing state only once a REMB above its
+// 22 kbps threshold arrives; without one it holds audio at 15 kbps for the whole call.
+func NextAudioReceiverEstimate(previous uint32, lossPercent float64) uint32 {
+	// Source of truth: https://github.com/vinikjkkj/zapo/blob/3c594911144e09951bd58f084f40162145bde9cc/packages/voip-media/src/media/rtcp.ts#L902-L925
+	if previous == 0 {
+		return audioReceiverEstimateInitialBps
+	}
+	next := float64(previous)
+	switch {
+	case lossPercent >= receiverEstimateCongestLoss:
+		next *= receiverEstimateBackoff
+	case lossPercent < receiverEstimateQuietLoss:
+		next *= audioReceiverEstimateGrowth
+	}
+	if next < audioReceiverEstimateMinBps {
+		return audioReceiverEstimateMinBps
+	}
+	if next > audioReceiverEstimateMaxBps {
+		return audioReceiverEstimateMaxBps
+	}
+	return uint32(next)
+}
+
 // ReceiverEstimate accumulates inbound video octets per window and carries the
 // announced ceiling across windows. Safe for the receive loop and the RTCP ticker.
 type ReceiverEstimate struct {

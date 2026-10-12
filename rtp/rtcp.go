@@ -95,6 +95,8 @@ type RtcpReceptionStats struct {
 	received             uint32
 	expectedPrior        uint32
 	receivedPrior        uint32
+	lossExpectedPrior    uint32
+	lossReceivedPrior    uint32
 	transit              uint32
 	hasTransit           bool
 	jitterQ4             uint64
@@ -111,6 +113,8 @@ func (s *RtcpReceptionStats) Observe(ssrc uint32, sequence uint16, rtpTimestamp 
 		s.sequenceCycles = 0
 		s.expectedPrior = 0
 		s.receivedPrior = 0
+		s.lossExpectedPrior = 0
+		s.lossReceivedPrior = 0
 		s.hasTransit = false
 		s.jitterQ4 = 0
 		s.lastSenderReport = 0
@@ -149,6 +153,26 @@ func (s *RtcpReceptionStats) Observe(ssrc uint32, sequence uint16, rtpTimestamp 
 	}
 	s.transit = transit
 	s.hasTransit = true
+}
+
+// TakeLossPercent returns the loss percent since the previous TakeLossPercent call, on
+// counters of its own, so the reception-report interval stays untouched.
+func (s *RtcpReceptionStats) TakeLossPercent() float64 {
+	// Source of truth: https://github.com/vinikjkkj/zapo/blob/3c594911144e09951bd58f084f40162145bde9cc/packages/voip-media/src/media/rtcp.ts#L259-L269
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.hasSsrc {
+		return 0
+	}
+	expected := s.sequenceCycles + uint32(s.maxSequence) - uint32(s.baseSequence) + 1
+	expectedInterval := int64(expected) - int64(s.lossExpectedPrior)
+	lostInterval := expectedInterval - (int64(s.received) - int64(s.lossReceivedPrior))
+	s.lossExpectedPrior = expected
+	s.lossReceivedPrior = s.received
+	if expectedInterval <= 0 || lostInterval <= 0 {
+		return 0
+	}
+	return float64(lostInterval) * 100 / float64(expectedInterval)
 }
 
 // CumulativeLossPercent is the whole-stream loss so far, in percent, read without
@@ -402,6 +426,49 @@ func BuildPictureLossIndication(senderSSRC, mediaSSRC uint32, profileExtension b
 	binary.BigEndian.PutUint16(packet[2:4], 2)
 	binary.BigEndian.PutUint32(packet[4:8], senderSSRC)
 	binary.BigEndian.PutUint32(packet[8:12], mediaSSRC)
+	return packet
+}
+
+// RtcpFmtRemb is the PSFB feedback message type of a REMB (draft-alvestrand-rmcat-remb).
+const RtcpFmtRemb = 15
+
+const (
+	rembIdentifier   = 0x52454d42 // "REMB"
+	rembMantissaBits = 18
+	rembMaxMantissa  = 1<<rembMantissaBits - 1
+	rembMaxExponent  = 0x3f
+)
+
+// EncodeRembBitrate packs bps as the REMB exponent/mantissa pair, truncating so the
+// encoded ceiling never exceeds the one asked for and saturating above the field's range.
+func EncodeRembBitrate(bps uint32) uint32 {
+	// Source of truth: https://github.com/vinikjkkj/zapo/blob/3c594911144e09951bd58f084f40162145bde9cc/packages/voip-media/src/media/rtcp.ts#L926-L935
+	mantissa := bps
+	var exponent uint32
+	for mantissa > rembMaxMantissa && exponent < rembMaxExponent {
+		mantissa >>= 1
+		exponent++
+	}
+	if mantissa > rembMaxMantissa {
+		mantissa = rembMaxMantissa
+	}
+	return exponent<<rembMantissaBits | mantissa
+}
+
+// BuildReceiverEstimatedMaxBitrate builds a PSFB REMB from senderSSRC announcing bps as the
+// receive ceiling for the one stream mediaSSRC. The media-source field is zero, as the
+// REMB format requires; no WhatsApp profile bit is set.
+func BuildReceiverEstimatedMaxBitrate(senderSSRC, mediaSSRC, bps uint32) [24]byte {
+	// Source of truth: https://github.com/vinikjkkj/zapo/blob/3c594911144e09951bd58f084f40162145bde9cc/packages/voip-media/src/media/rtcp.ts#L993-L1009
+	var packet [24]byte
+	packet[0] = 0x80 | RtcpFmtRemb
+	packet[1] = RtcpPtPsfb
+	binary.BigEndian.PutUint16(packet[2:4], uint16(len(packet)/4-1))
+	binary.BigEndian.PutUint32(packet[4:8], senderSSRC)
+	binary.BigEndian.PutUint32(packet[8:12], 0)
+	binary.BigEndian.PutUint32(packet[12:16], rembIdentifier)
+	binary.BigEndian.PutUint32(packet[16:20], 1<<24|EncodeRembBitrate(bps))
+	binary.BigEndian.PutUint32(packet[20:24], mediaSSRC)
 	return packet
 }
 

@@ -7,6 +7,18 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
 
 ## [Unreleased]
 
+### rtp/audio-remb — `KAT-verified` (packet); estimator `implemented`
+
+- The callee and caller now send a PSFB REMB for the peer's audio SSRC on every
+  RTCP tick of a 1:1 call. The peer's audio quality controller leaves its
+  probing state only on a REMB above 22 kbps; without one the official clients
+  hold audio at 15 kbps for the whole call. The ceiling opens at 24 kbps, grows
+  10 % per interval under 2 % interval loss up to 30 kbps, holds up to 10 % and
+  backs off 15 % above, never below 16 kbps. `TakeLossPercent` measures the
+  interval on its own counters so the sender-report interval is untouched.
+  Packet bytes and estimator bands are unit-tested; the live bitrate change on
+  a WhatsApp peer is pending.
+
 ### media/video-send-hold — `implemented`
 
 - Outbound video now waits for the peer to be ready before the first packet

@@ -43,6 +43,18 @@ func (s *RtcpReceptionStatsSet) Observe(
 	stream.Observe(ssrc, sequence, rtpTimestamp, arrivalMs, clockRate)
 }
 
+// TakeLossPercent returns one tracked SSRC's loss percent since the previous call; 0 for
+// an untracked SSRC.
+func (s *RtcpReceptionStatsSet) TakeLossPercent(ssrc uint32) float64 {
+	s.mu.Lock()
+	stream := s.streams[ssrc]
+	s.mu.Unlock()
+	if stream == nil {
+		return 0
+	}
+	return stream.TakeLossPercent()
+}
+
 // CumulativeLossPercent is the whole-stream loss of one tracked SSRC, in percent;
 // 0 for an untracked SSRC.
 func (s *RtcpReceptionStatsSet) CumulativeLossPercent(ssrc uint32) float64 {

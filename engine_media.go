@@ -752,6 +752,7 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 		ticker := time.NewTicker(time.Duration(rtcpIntervalMs) * time.Millisecond)
 		defer ticker.Stop()
 		var sent uint64
+		var audioEstimateBps uint32
 		for {
 			select {
 			case <-ctx.Done():
@@ -787,6 +788,20 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 				)
 				if err != nil {
 					return
+				}
+				// Source of truth: https://github.com/vinikjkkj/zapo/blob/3c594911144e09951bd58f084f40162145bde9cc/packages/voip-media/src/call/WaCallMediaPlane.ts#L2010-L2036
+				if len(audioReports) > 0 && !groupMode.Load() {
+					peerAudioSSRC := audioReports[0].Ssrc
+					audioEstimateBps = rtp.NextAudioReceiverEstimate(audioEstimateBps, audioReception.TakeLossPercent(peerAudioSSRC))
+					remb, rembErr := audioRtcp.receiverEstimatedMaxBitrate(peerAudioSSRC, audioEstimateBps)
+					if rembErr != nil {
+						log.Warn().Err(rembErr).Uint32("ssrc", peerAudioSSRC).Msg("audio REMB protect failed")
+					} else {
+						if _, rembErr = ch.Send(remb); rembErr != nil {
+							return
+						}
+						e.c.diag.Emit("rtcp", map[string]any{"event": "audio_remb", "ssrc": peerAudioSSRC, "bps": audioEstimateBps})
+					}
 				}
 				if ceiling := videoEstimate.Tick(nowMs, videoReception.CumulativeLossPercent); ceiling > 0 {
 					e.c.diag.Emit("video", map[string]any{"event": "receiver_estimate", "bps": ceiling})
@@ -1462,6 +1477,18 @@ func (s *mediaSrtcpSender) pictureLossIndication(mediaSSRC uint32) ([]byte, erro
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	plain := rtp.BuildPictureLossIndication(s.ssrc, mediaSSRC, s.profile)
+	packet, err := srtp.ProtectSrtcp(&s.keys, s.ssrc, s.index, plain[:])
+	if err == nil {
+		s.index++
+	}
+	return packet, err
+}
+
+func (s *mediaSrtcpSender) receiverEstimatedMaxBitrate(mediaSSRC, bps uint32) ([]byte, error) {
+	// Source of truth: https://github.com/vinikjkkj/zapo/blob/3c594911144e09951bd58f084f40162145bde9cc/packages/voip-media/src/call/WaCallMediaPlane.ts#L2010-L2036
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	plain := rtp.BuildReceiverEstimatedMaxBitrate(s.ssrc, mediaSSRC, bps)
 	packet, err := srtp.ProtectSrtcp(&s.keys, s.ssrc, s.index, plain[:])
 	if err == nil {
 		s.index++
