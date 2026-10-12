@@ -455,6 +455,7 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 	// relayRx counts packets received from the relay, so the silence watchdog can warn if
 	// the relay never answers our allocate.
 	var relayRx atomic.Uint64
+	relayAnswered := false
 
 	// Inbound calls are torn down by the caller within ~400ms if the relay bind never
 	// comes alive; check at 400ms and 900ms and say so explicitly.
@@ -919,6 +920,12 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 			continue
 		case relay.RelayPacketStun:
 			mt, isStun := stun.StunMessageType(pkt)
+			// Source of truth: https://github.com/vinikjkkj/zapo/blob/3c594911144e09951bd58f084f40162145bde9cc/packages/voip/src/call/WaCallMediaSession.ts#L771-L780
+			if isStun && mt == stun.MsgAllocateSuccess && !relayAnswered {
+				relayAnswered = true
+				e.c.diag.Emit("stun", map[string]any{"event": "allocate_success", "call_id": callID})
+				e.announceRelayLatency(callID)
+			}
 			if isStun && mt == stun.MsgBindingRequest {
 				resp, answered, err := allocateState.SendBindingSuccess(pkt, func(packet []byte) error {
 					_, sendErr := ch.Send(packet)

@@ -1,54 +1,56 @@
-# Relaylatency answer (callee side)
+# Relaylatency (callee side)
 
 **Status:** implemented; unit-tested; live retest pending
 
 **Reference pinned at:**
 
-- zapo `87dd5b0cdd5e7e0c40b209b3bc7d47b0043d2349` (`packages/voip/src/call/WaCallMediaSession.ts#L1103-L1148`)
-- driving change: zapo `808f920fd1e2800a0a43d8c6ab53eed4983e02f0` (PR #288, "fix silent and one-way audio on incoming calls")
-- whatsapp-rust HEAD lists `relay_latency` as an unwired builder: the reference sends no answer at all
+- zapo `3c594911144e09951bd58f084f40162145bde9cc`
+  (`packages/voip/src/call/WaCallMediaSession.ts#L719-L780` own report, `#L1150-L1172`
+  received report)
+- driving changes: zapo `fa528f1df427e60c3cf820a44522207dcdf4e968` (PR #305, "never answer
+  relaylatency and announce each relay once") and `04073f8834ffee819078fec8bd2dc315f8f374bc`
+  (PR #309, "announce only the relays that answered")
+- whatsapp-rust HEAD lists `relay_latency` as an unwired builder: the reference sends nothing
 
-## Observed facts (from the zapo commit message, measured live)
+## Observed facts (zapo, measured live)
 
-- The caller's `<relaylatency>` carries one `<te relay_name latency>` per relay the
-  caller probed, with the caller's own RTT and the caller's view of the address.
-- Echoing those `<te>` nodes back reports the peer's latencies as ours, for relays we
-  were never given. The caller then elected such a relay as the best common one and
-  moved its uplink there after the first few packets, leaving the call one-way.
-- The relay `te2` endpoints in the offer/ack carry a server-measured `c2r_rtt`
-  attribute; zapo answers with that value for the relays it dials, with its own
-  endpoint bytes, and sends nothing if the peer named none of them.
+- WhatsApp only reads a received `<relaylatency>` to feed its relay election and never
+  answers one. Two clients that answered each other looped for the whole call: 549 stanzas
+  in 140 s.
+- Every relay that passed the dial rule used to be named, including one never reached. The
+  Android client chose that relay, the lowest latency from its own network, sent all its
+  media there, and nothing of it reached the other side. The official clients only report
+  relays they measured.
+- The report names each relay once per call with the server-measured `c2r_rtt` of the
+  `te2` endpoint and that endpoint's own address bytes.
 
 ## Reference source (zapo, MIT)
 
 ```ts
-const ownByName = new Map<string, { latency: number; address: Uint8Array }>()
-for (const ep of dialableRelayEndpoints(this.info.relayData?.endpoints ?? [])) {
-    if (!ep.relayName || !ep.addressBytes || ownByName.has(ep.relayName)) continue
-    ownByName.set(ep.relayName, { latency: ep.c2rRtt || 0, address: ep.addressBytes })
+// a received report is stored, nothing is sent back
+handleCallRelaylatency(node, peerJid) {
+    for (const te of getNodeChildrenByTag(inner, 'te')) { ...this.peerRelayLatencies.set(name, latency) }
 }
-const teNodes: BinaryNode[] = []
-for (const te of getNodeChildrenByTag(inner, 'te')) {
-    const name = te.attrs?.relay_name
-    const own = name ? ownByName.get(name) : undefined
-    if (!name || !own) continue
-    teNodes.push({
-        tag: 'te',
-        attrs: { relay_name: name, latency: String(0x2000000 + own.latency) },
-        content: own.address
-    })
+// our own report: only relays we dial and that answered, once per name
+private dialableRelayLatencies() {
+    for (const ep of dialableRelayEndpoints(endpoints)) {
+        if (!this.answeredRelays.has(ep.relayName)) continue
+        relays.push({ relayName: ep.relayName, latency: ep.c2rRtt ?? ..., addressBytes: ep.addressBytes })
+    }
 }
-if (teNodes.length === 0) return
 ```
 
 ## Go target
 
-- `relayEndpoint` gains `c2rRTTMs` (`te2 c2r_rtt`) and `addrBytes` (raw 6-byte content).
-- `relayLatencyAnswers(rl, rd, inbound)` returns at most one `rlProbe`: the relay
-  `getMediaRelayEndpoint` dials, when a peer `<te>` names it.
-- `onRelayLatency` sends one `<relaylatency>` per answer and nothing otherwise.
+- `onRelayLatency`: records the peer's relay names at debug; sends nothing.
+- `announceRelayLatency(callID)`: inbound calls only, once per call (`relayAnnounced`),
+  called from the media loop on the first STUN allocate-success from the relay we dial;
+  the `<te>` carries that relay's name, `c2r_rtt` and address bytes.
+- `ownRelayLatency(rd, inbound)`: the one entry this client may report.
 
-## Deviation from zapo
+## Deviations
 
-meowcaller dials exactly one relay (the inbound FNA endpoint), so the answer set is
-one entry at most, where zapo answers for every relay it dials.
+- meowcaller dials one relay, so the report has one entry; zapo names every relay that
+  answered.
+- The outgoing side sends neither `<relaylatency>` nor `<transport>` today, unchanged by
+  this module.

@@ -7,6 +7,17 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
 
 ## [Unreleased]
 
+### signaling/relaylatency — `implemented`
+
+- A received `<relaylatency>` is no longer answered. WhatsApp reads a received
+  report to feed its relay election and never replies to one; two clients that
+  both answered looped for a whole call (549 stanzas in 140 s). The callee now
+  sends its own report once per call, naming only the relay it dials with the
+  server-measured `c2r_rtt`, and only after that relay answered our STUN
+  allocate: naming a relay we never reached made the Android peer elect it and
+  send all its media where nothing of it reached us. Unit tests cover the
+  single announcement, the outgoing/no-relay silence and the never-answer rule.
+
 ### rtp/audio-remb — `KAT-verified` (packet); estimator `implemented`
 
 - The callee and caller now send a PSFB REMB for the peer's audio SSRC on every

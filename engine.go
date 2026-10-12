@@ -59,6 +59,7 @@ type engineCall struct {
 	rtcpRembDisabled  bool                         // server turned REMB over RTCP off (voip_settings vid_rc.disable_rtcp_remb)
 	peerMuteSeen      bool                         // the peer's first <mute_v2> arrived (it is ready to receive video)
 	peerVideoPending  bool                         // we accepted the peer's upgrade; its <video state=1> is still to come
+	relayAnnounced    bool                         // our one <relaylatency> naming the relay we are on has gone out
 	localVideo        bool                         // this client is sending, or has requested to send, video
 	videoCaps         *signaling.VideoCapabilities // <video> capability attributes for the offer/accept; nil = defaults
 	remoteVideo       bool                         // the peer is sending video to this client
@@ -805,41 +806,65 @@ func (e *engine) onRelay(callID string, data *waBinary.Node) {
 	e.maybeStartMedia(callID)
 }
 
-// onRelayLatency answers the caller's relaylatency probes (the callee's half of the
-// relay election) for the one relay this client dials. It does NOT send the accept —
-// that is deferred until <mute_v2>.
+// onRelayLatency records the caller's relay latency report. Nothing is answered:
+// WhatsApp reads a received report to feed its relay election and never replies to one,
+// and two clients that both answered looped for the whole call. Our own report goes out
+// once, from announceRelayLatency, after the relay we dial answers our allocate.
 func (e *engine) onRelayLatency(ev *events.CallRelayLatency) {
-	m := e.lookup(ev.CallID)
-	if m == nil || m.direction != CallDirectionIncoming {
-		return
-	}
+	// Source of truth: https://github.com/vinikjkkj/zapo/blob/3c594911144e09951bd58f084f40162145bde9cc/packages/voip/src/call/WaCallMediaSession.ts#L1150-L1172
 	rl := findChild(ev.Data, "relaylatency")
 	if rl == nil {
 		return
 	}
-	e.mu.Lock()
-	rd := m.relay
-	e.mu.Unlock()
-	probes := relayLatencyAnswers(rl, rd, true)
-	if len(probes) == 0 {
-		e.c.log.Debug().Str("call_id", ev.CallID).Msg("relaylatency names no relay this client dials; not answering")
-		return
-	}
-	for _, p := range probes {
-		resp := signaling.BuildRelayLatency(&signaling.RelayLatencyParams{
-			CallID:       ev.CallID,
-			To:           ev.From,
-			CallCreator:  ev.CallCreator,
-			LatencyMs:    p.latency,
-			RelayName:    p.relayName,
-			AddressBytes: p.addr,
-		})
-		resp.Attrs["id"] = e.c.wa.GenerateMessageID()
-		if err := e.c.wa.DangerousInternals().SendNode(context.Background(), resp); err != nil {
-			e.c.log.Error().Err(err).Str("call_id", ev.CallID).Msg("send relaylatency failed")
-			return
+	kids := rl.GetChildren()
+	names := make([]string, 0, len(kids))
+	for i := range kids {
+		if kids[i].Tag == "te" {
+			names = append(names, kids[i].AttrGetter().String("relay_name"))
 		}
 	}
+	e.c.log.Debug().Str("call_id", ev.CallID).Strs("relay_names", names).Msg("peer relay latency report recorded; not answered")
+}
+
+// announceRelayLatency sends our one <relaylatency> for an inbound call, naming the relay
+// this client dials with the server-measured c2r_rtt, once the relay has answered our
+// allocate. Naming a relay we never reached makes the caller elect one we are not on.
+func (e *engine) announceRelayLatency(callID string) {
+	// Source of truth: https://github.com/vinikjkkj/zapo/blob/3c594911144e09951bd58f084f40162145bde9cc/packages/voip/src/call/WaCallMediaSession.ts#L719-L780
+	e.mu.Lock()
+	m := e.calls[callID]
+	if m == nil || m.direction != CallDirectionIncoming || m.relayAnnounced {
+		e.mu.Unlock()
+		return
+	}
+	own, ok := ownRelayLatency(m.relay, true)
+	if !ok {
+		e.mu.Unlock()
+		return
+	}
+	m.relayAnnounced = true
+	to, creator := m.from, m.creator
+	e.mu.Unlock()
+
+	node := signaling.BuildRelayLatency(&signaling.RelayLatencyParams{
+		CallID:       callID,
+		To:           to,
+		CallCreator:  creator,
+		LatencyMs:    own.latency,
+		RelayName:    own.relayName,
+		AddressBytes: own.addr,
+	})
+	node.Attrs["id"] = e.nextCallNodeID()
+	if err := e.transmitCallNode(context.Background(), node); err != nil {
+		e.mu.Lock()
+		if current := e.calls[callID]; current == m {
+			current.relayAnnounced = false
+		}
+		e.mu.Unlock()
+		e.c.log.Error().Err(err).Str("call_id", callID).Msg("send relaylatency failed")
+		return
+	}
+	e.c.log.Info().Str("call_id", callID).Str("relay_name", own.relayName).Uint32("c2r_rtt_ms", own.latency).Msg("announced relay latency for the relay we are on")
 }
 
 // onPreAccept records that the peer's device received and started preparing an outgoing call.
@@ -998,36 +1023,25 @@ func (e *engine) onReject(ev *events.CallReject) {
 	e.finishCall(ev.CallID, "rejected")
 }
 
-// rlProbe is one relay candidate from a relaylatency probe.
+// rlProbe is one relay entry of a relaylatency report.
 type rlProbe struct {
 	latency   uint32
 	relayName string
 	addr      []byte
 }
 
-// relayLatencyAnswers builds the <te> answers for an inbound <relaylatency>: one per peer
-// probe that names the relay this client dials, carrying our own c2r_rtt and endpoint
-// bytes. Probes for relays we are not on are dropped, so the caller cannot elect one.
-func relayLatencyAnswers(rl *waBinary.Node, rd *relayData, inbound bool) []rlProbe {
-	// Source of truth: https://github.com/vinikjkkj/zapo/blob/87dd5b0cdd5e7e0c40b209b3bc7d47b0043d2349/packages/voip/src/call/WaCallMediaSession.ts#L1103-L1128
-	if rl == nil || rd == nil {
-		return nil
+// ownRelayLatency is the <te> this client may report: the relay it dials, with the
+// server-measured c2r_rtt and that endpoint's own address bytes.
+func ownRelayLatency(rd *relayData, inbound bool) (rlProbe, bool) {
+	// Source of truth: https://github.com/vinikjkkj/zapo/blob/3c594911144e09951bd58f084f40162145bde9cc/packages/voip/src/call/WaCallMediaSession.ts#L755-L769
+	if rd == nil {
+		return rlProbe{}, false
 	}
 	ep := getMediaRelayEndpoint(rd, inbound)
 	if ep == nil || ep.relayName == "" || len(ep.addrBytes) == 0 {
-		return nil
+		return rlProbe{}, false
 	}
-	var answers []rlProbe
-	kids := rl.GetChildren()
-	for i := range kids {
-		te := &kids[i]
-		if te.Tag != "te" || te.AttrGetter().String("relay_name") != ep.relayName {
-			continue
-		}
-		answers = append(answers, rlProbe{latency: ep.c2rRTTMs, relayName: ep.relayName, addr: ep.addrBytes})
-		break
-	}
-	return answers
+	return rlProbe{latency: ep.c2rRTTMs, relayName: ep.relayName, addr: ep.addrBytes}, true
 }
 
 // applyVoipSettingsCodec finds the <voip_settings> blob under node (an inbound
