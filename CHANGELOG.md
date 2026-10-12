@@ -7,6 +7,14 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
 
 ## [Unreleased]
 
+### media/video-keyframe-shape — `implemented`
+
+- A key frame whose SPS precedes its IDR now goes out as one STAP-A holding
+  every NAL unit when the aggregate fits the payload budget, as the official
+  clients send it; a larger key frame keeps the FU-A typed SPS with the inner
+  start codes, which the Android client needs to render our video. Delta
+  frames are unchanged. Tests cover both shapes end to end through SRTP.
+
 ### signaling/relaylatency — `implemented`
 
 - A received `<relaylatency>` is no longer answered. WhatsApp reads a received

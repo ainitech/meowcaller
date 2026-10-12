@@ -1503,6 +1503,21 @@ func (s *mediaSrtcpSender) receiverEstimatedMaxBitrate(mediaSSRC, bps uint32) ([
 	return packet, err
 }
 
+// keyFrameHasSPSBeforeIDR reports whether an SPS precedes the first IDR slice.
+func keyFrameHasSPSBeforeIDR(nalus [][]byte) bool {
+	// Source of truth: https://github.com/vinikjkkj/zapo/blob/3c594911144e09951bd58f084f40162145bde9cc/packages/voip-media/src/media/h264.ts#L60-L68
+	sps := false
+	for _, n := range nalus {
+		switch n[0] & 0x1f {
+		case 7:
+			sps = true
+		case 5:
+			return sps
+		}
+	}
+	return false
+}
+
 func (vs *videoSender) protectAccessUnit(au []byte, duration time.Duration) [][]byte {
 	vs.mu.Lock()
 	defer vs.mu.Unlock()
@@ -1525,10 +1540,12 @@ func (vs *videoSender) protectAccessUnitLocked(au []byte, duration time.Duration
 	}
 	nalus := rtp.SplitAnnexB(au)
 	var packedAccessUnit []byte
+	kept := make([][]byte, 0, len(nalus))
 	for _, n := range nalus {
 		if len(n) == 0 || n[0]&0x1f == 9 {
 			continue
 		}
+		kept = append(kept, n)
 		if len(packedAccessUnit) > 0 {
 			packedAccessUnit = append(packedAccessUnit, 0, 0, 0, 1)
 		}
@@ -1537,8 +1554,19 @@ func (vs *videoSender) protectAccessUnitLocked(au []byte, duration time.Duration
 	if len(packedAccessUnit) == 0 {
 		return nil
 	}
-	// WhatsApp fragments the complete Annex-B access unit as one RTP NAL unit.
-	payloads := rtp.PackageH264NALU(packedAccessUnit)
+	// A key frame travels as one unit: every NAL unit in a STAP-A when it fits the payload
+	// budget, else the complete Annex-B access unit fragmented as one RTP NAL unit (FU-A
+	// typed SPS with the inner start codes kept).
+	// Source of truth: https://github.com/vinikjkkj/zapo/blob/3c594911144e09951bd58f084f40162145bde9cc/packages/voip-media/src/media/h264.ts#L22-L57
+	var payloads [][]byte
+	if idr && keyFrameHasSPSBeforeIDR(kept) {
+		if stap := rtp.PackageH264STAPA(kept); stap != nil {
+			payloads = [][]byte{stap}
+		}
+	}
+	if payloads == nil {
+		payloads = rtp.PackageH264NALU(packedAccessUnit)
+	}
 	captureWire := vs.frame < videoWireFrameLimit
 	if captureWire {
 		vs.diag.Emit("video_wire", map[string]any{

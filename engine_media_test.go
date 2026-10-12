@@ -318,3 +318,55 @@ func TestVideoSenderHoldNeverExtends(t *testing.T) {
 		t.Fatalf("a longer release extended the hold to %v", sender.holdUntil)
 	}
 }
+
+func annexBAccessUnit(nalus ...[]byte) []byte {
+	var au []byte
+	for _, n := range nalus {
+		au = append(au, 0, 0, 0, 1)
+		au = append(au, n...)
+	}
+	return au
+}
+
+func TestVideoSenderSendsSmallKeyFrameAsOneSTAPA(t *testing.T) {
+	callKey := iota32()
+	pipe, err := NewMediaPipeline(callKey, "111111111111111:0@lid", "222222222222222:0@lid", 0x55667788, FrameSamples)
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	sender := &videoSender{pipe: pipe, stream: rtp.NewVideoRtpStream(0x55667788, 4500), active: true}
+	sps := []byte{0x67, 0x42, 0, 0x1f}
+	pps := []byte{0x68, 0xce, 6, 0xe2}
+	idr := append([]byte{0x65}, make([]byte, 300)...)
+	packets := sender.protectAccessUnit(annexBAccessUnit(sps, pps, idr), 50*time.Millisecond)
+	if len(packets) != 1 {
+		t.Fatalf("got %d packets, want one STAP-A", len(packets))
+	}
+	receiver, err := NewMediaPipeline(callKey, "222222222222222:0@lid", "111111111111111:0@lid", 0x55667788, FrameSamples)
+	if err != nil {
+		t.Fatalf("receiver pipe: %v", err)
+	}
+	_, payload, ok := receiver.UnprotectAudio(packets[0])
+	if !ok {
+		t.Fatal("packet did not unprotect")
+	}
+	if payload[0]&0x1f != 24 {
+		t.Fatalf("payload NAL type = %d, want STAP-A (24)", payload[0]&0x1f)
+	}
+	var depack rtp.H264Depacketizer
+	nalus := depack.Depacketize(payload)
+	if len(nalus) != 3 || !bytes.Equal(nalus[0], sps) || !bytes.Equal(nalus[1], pps) || !bytes.Equal(nalus[2], idr) {
+		t.Fatalf("STAP-A carried %d NAL units, want SPS, PPS and IDR intact", len(nalus))
+	}
+
+	largeIDR := append([]byte{0x65}, make([]byte, 2000)...)
+	sender.requestKeyframe()
+	packets = sender.protectAccessUnit(annexBAccessUnit(sps, pps, largeIDR), 50*time.Millisecond)
+	if len(packets) < 2 {
+		t.Fatalf("large key frame produced %d packets, want FU-A fragments", len(packets))
+	}
+	_, first, ok := receiver.UnprotectAudio(packets[0])
+	if !ok || first[0]&0x1f != 28 || first[1]&0x1f != 7 {
+		t.Fatalf("large key frame first payload = %x..., want an FU-A typed SPS", first[:2])
+	}
+}
