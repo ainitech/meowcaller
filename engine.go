@@ -828,19 +828,20 @@ func (e *engine) onRelayLatency(ev *events.CallRelayLatency) {
 
 // announceRelayLatency sends our one <relaylatency> for an inbound call, naming the relay
 // this client dials with the server-measured c2r_rtt, once the relay has answered our
-// allocate. Naming a relay we never reached makes the caller elect one we are not on.
-func (e *engine) announceRelayLatency(callID string) {
+// allocate. Naming a relay we never reached makes the caller elect one we are not on. It
+// returns false only when a send failed, so the caller may try again on the next answer.
+func (e *engine) announceRelayLatency(callID string) bool {
 	// Source of truth: https://github.com/vinikjkkj/zapo/blob/3c594911144e09951bd58f084f40162145bde9cc/packages/voip/src/call/WaCallMediaSession.ts#L719-L780
 	e.mu.Lock()
 	m := e.calls[callID]
 	if m == nil || m.direction != CallDirectionIncoming || m.relayAnnounced {
 		e.mu.Unlock()
-		return
+		return true
 	}
 	own, ok := ownRelayLatency(m.relay, true)
 	if !ok {
 		e.mu.Unlock()
-		return
+		return true
 	}
 	m.relayAnnounced = true
 	to, creator := m.from, m.creator
@@ -862,9 +863,10 @@ func (e *engine) announceRelayLatency(callID string) {
 		}
 		e.mu.Unlock()
 		e.c.log.Error().Err(err).Str("call_id", callID).Msg("send relaylatency failed")
-		return
+		return false
 	}
 	e.c.log.Info().Str("call_id", callID).Str("relay_name", own.relayName).Uint32("c2r_rtt_ms", own.latency).Msg("announced relay latency for the relay we are on")
+	return true
 }
 
 // onPreAccept records that the peer's device received and started preparing an outgoing call.

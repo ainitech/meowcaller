@@ -115,3 +115,26 @@ func TestInboundRelayLatencyReportIsNeverAnswered(t *testing.T) {
 		Tag: "relaylatency", Content: []waBinary.Node{{Tag: "te", Attrs: waBinary.Attrs{"relay_name": "gru1c02", "latency": "33554477"}}},
 	}}}})
 }
+
+func TestAnnounceRelayLatencyRetriesAfterAFailedSend(t *testing.T) {
+	eng, call := testEngineWithIncomingCall()
+	fail := true
+	sends := 0
+	eng.sendCallNode = func(context.Context, waBinary.Node) error {
+		sends++
+		if fail {
+			return context.DeadlineExceeded
+		}
+		return nil
+	}
+	if eng.announceRelayLatency(call.id) {
+		t.Fatal("a failed send must report false so the media loop retries")
+	}
+	fail = false
+	if !eng.announceRelayLatency(call.id) || sends != 2 {
+		t.Fatalf("retry: ok=%v sends=%d, want a second send that succeeds", !fail, sends)
+	}
+	if !eng.announceRelayLatency(call.id) || sends != 2 {
+		t.Fatal("once announced, nothing more goes out")
+	}
+}

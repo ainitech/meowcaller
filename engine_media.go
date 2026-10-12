@@ -922,9 +922,8 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 			mt, isStun := stun.StunMessageType(pkt)
 			// Source of truth: https://github.com/vinikjkkj/zapo/blob/3c594911144e09951bd58f084f40162145bde9cc/packages/voip/src/call/WaCallMediaSession.ts#L771-L780
 			if isStun && mt == stun.MsgAllocateSuccess && !relayAnswered {
-				relayAnswered = true
 				e.c.diag.Emit("stun", map[string]any{"event": "allocate_success", "call_id": callID})
-				e.announceRelayLatency(callID)
+				relayAnswered = e.announceRelayLatency(callID)
 			}
 			if isStun && mt == stun.MsgBindingRequest {
 				resp, answered, err := allocateState.SendBindingSuccess(pkt, func(packet []byte) error {
