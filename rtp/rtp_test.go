@@ -435,3 +435,24 @@ func TestRtcpClassification(t *testing.T) {
 		t.Error("marker-set H.264 RTP must not classify as RTCP")
 	}
 }
+
+func TestNextPacketSpanningAdvancesTheTimestampPerFrame(t *testing.T) {
+	stream := NewRtpStream(0x11223344, 960, false)
+	speech := []byte{0x50, 1, 2, 3, 4, 5, 6, 7, 8, 9}
+	first := stream.NextPacketSpanning([]byte{0x92, 2, 10, 0x50, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0x50, 1, 2, 3}, speech, false, 2)
+	second := stream.NextPacket([]byte{0x50, 1, 2, 3}, false)
+	if first.Timestamp != 0 || second.Timestamp != 1920 {
+		t.Fatalf("timestamps = (%d, %d), want (0, 1920): a two-frame packet spans both frames", first.Timestamp, second.Timestamp)
+	}
+	if !first.Marker || second.Marker {
+		t.Fatalf("markers = (%v, %v), want the first speech packet marked only", first.Marker, second.Marker)
+	}
+
+	// DTX is read from the first bundled frame, not from the container header.
+	dtxStream := NewRtpStream(0x11223344, 960, true)
+	container := []byte{0x92, 2, 1, 0x10, 0x10}
+	header := dtxStream.NextPacketSpanning(container, []byte{0x10}, false, 2)
+	if header.Marker || header.ExtensionWord == nil || *header.ExtensionWord != WhatsappRtpExtensionDtxWord {
+		t.Fatalf("bundled DTX header = %+v, want no marker and the DTX extension word", header)
+	}
+}

@@ -68,3 +68,17 @@ func TestParseVoipSettingsRtcpKeys(t *testing.T) {
 		t.Errorf("got disable_rtcp_remb=%v interval=%d, want true/1000", vs.DisableRtcpRemb, vs.RtcpIntervalMs)
 	}
 }
+
+func TestParseVoipSettingsMaxFramesPerPacket(t *testing.T) {
+	raw, err := os.ReadFile("testdata/voip_settings_sample.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	vs, err := ParseVoipSettings(raw)
+	if err != nil {
+		t.Fatalf("ParseVoipSettings: %v", err)
+	}
+	if vs.MaxFramesPerPacket != 2 {
+		t.Errorf("MaxFramesPerPacket = %d, want 2 (sample rc.maxfpp)", vs.MaxFramesPerPacket)
+	}
+}

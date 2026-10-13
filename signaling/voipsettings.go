@@ -26,6 +26,8 @@ type VoipSettings struct {
 	FrameMs int
 	// TargetBitrate mirrors rc.target_bitrate in bits/s; 0 if absent.
 	TargetBitrate int
+	// MaxFramesPerPacket mirrors rc.maxfpp, the audio frames the peer bundles per RTP packet; 0 if absent.
+	MaxFramesPerPacket int
 	// RtcpIntervalMs mirrors rc.rtcp_interval_ms, the server's RTCP report cadence; 0 if absent.
 	RtcpIntervalMs int
 	// DisableRtcpRemb mirrors vid_rc.disable_rtcp_remb: the server turned REMB over RTCP off
@@ -53,6 +55,7 @@ func ParseVoipSettings(raw []byte, log ...zerolog.Logger) (*VoipSettings, error)
 		RC struct {
 			TargetBitrate  string `json:"target_bitrate"`
 			RtcpIntervalMs string `json:"rtcp_interval_ms"`
+			MaxFpp         string `json:"maxfpp"`
 		} `json:"rc"`
 		VidRC struct {
 			DisableRtcpRemb string `json:"disable_rtcp_remb"`
@@ -63,10 +66,11 @@ func ParseVoipSettings(raw []byte, log ...zerolog.Logger) (*VoipSettings, error)
 		return nil, fmt.Errorf("signaling: parse voip_settings: %w", err)
 	}
 	vs := &VoipSettings{
-		UseMlowCodecV1: doc.Encode.UseMlowCodecV1 != "false",
-		FrameMs:        atoiOrZero(doc.Encode.FrameMs),
-		TargetBitrate:  atoiOrZero(doc.RC.TargetBitrate),
-		RtcpIntervalMs: atoiOrZero(doc.RC.RtcpIntervalMs),
+		UseMlowCodecV1:     doc.Encode.UseMlowCodecV1 != "false",
+		FrameMs:            atoiOrZero(doc.Encode.FrameMs),
+		TargetBitrate:      atoiOrZero(doc.RC.TargetBitrate),
+		RtcpIntervalMs:     atoiOrZero(doc.RC.RtcpIntervalMs),
+		MaxFramesPerPacket: atoiOrZero(doc.RC.MaxFpp),
 		// Source of truth: https://github.com/vinikjkkj/zapo/blob/87dd5b0cdd5e7e0c40b209b3bc7d47b0043d2349/packages/voip/src/signaling/voip-settings.ts#L40-L50
 		DisableRtcpRemb: doc.VidRC.DisableRtcpRemb == "1" || strings.EqualFold(doc.VidRC.DisableRtcpRemb, "true"),
 		Present:         true,
@@ -76,6 +80,7 @@ func ParseVoipSettings(raw []byte, log ...zerolog.Logger) (*VoipSettings, error)
 		Int("frame_ms", vs.FrameMs).
 		Int("target_bitrate", vs.TargetBitrate).
 		Int("rtcp_interval_ms", vs.RtcpIntervalMs).
+		Int("maxfpp", vs.MaxFramesPerPacket).
 		Bool("disable_rtcp_remb", vs.DisableRtcpRemb).
 		Msg("parsed voip_settings")
 	return vs, nil

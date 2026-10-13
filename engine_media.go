@@ -561,11 +561,18 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 	// bridge the peer's media until it sees our stream. So we send silence frames until the
 	// Player has real audio (nextFrame() == nil means send silence).
 	frameInterval := time.Duration(FrameSamples) * time.Second / SampleRate
+	e.mu.Lock()
+	audioFramesPerPkt := 1
+	if m := e.calls[callID]; m != nil && m.audioFramesPerPkt > 1 {
+		audioFramesPerPkt = m.audioFramesPerPkt
+	}
+	e.mu.Unlock()
 	go func() {
 		silence := make([]float32, FrameSamples)
 		ticker := time.NewTicker(frameInterval)
 		defer ticker.Stop()
 		var txCount uint64
+		var pending []byte
 		for {
 			select {
 			case <-ctx.Done():
@@ -582,7 +589,29 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 			if err != nil {
 				continue
 			}
-			packet, err := txPipe.ProtectAudio(payload)
+			// The official 1:1 client bundles two 60 ms frames per packet when rc.maxfpp allows;
+			// the first frame waits one tick for its pair, and the packet's timestamp spans both.
+			// Source of truth: https://github.com/vinikjkkj/zapo/blob/3c594911144e09951bd58f084f40162145bde9cc/packages/voip-media/src/call/WaCallMediaPlane.ts#L1307-L1352
+			frameCount := uint32(1)
+			firstFrame := payload
+			if audioFramesPerPkt > 1 {
+				if pending == nil {
+					pending = payload
+					continue
+				}
+				if bundled, packErr := mlow.PackMultiframe([][]byte{pending, payload}); packErr == nil {
+					payload, firstFrame, frameCount = bundled, pending, 2
+				} else {
+					log.Debug().Err(packErr).Msg("audio frames not bundled; sending the pending frame alone")
+					if single, protectErr := txPipe.ProtectAudio(pending); protectErr == nil {
+						if _, sendErr := ch.Send(single); sendErr != nil {
+							return
+						}
+					}
+				}
+				pending = nil
+			}
+			packet, err := txPipe.ProtectAudioBundle(payload, firstFrame, frameCount)
 			if err != nil {
 				continue
 			}

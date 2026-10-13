@@ -501,9 +501,23 @@ func (s *RtpStream) resolveWarpExtension(dtx bool) *uint32 {
 
 // NextPacket builds the next RTP header for payload, latching the marker on the first speech frame.
 func (s *RtpStream) NextPacket(payload []byte, marker bool) RtpHeader {
+	return s.NextPacketSpanning(payload, payload, marker, 1)
+}
+
+// NextPacketSpanning is NextPacket for a payload bundling frameCount audio frames: the
+// timestamp advances by every frame the packet carries, and DTX/speech are read from
+// firstFrame, the first bundled frame, not from the container header.
+func (s *RtpStream) NextPacketSpanning(payload, firstFrame []byte, marker bool, frameCount uint32) RtpHeader {
 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4e6ba4610e054e9ede3af1d5e88a83faee/wacore/src/voip/rtp.rs#L213-L234
-	dtx := IsOpusDtxPayload(payload)
-	priming := IsOpusPrimingPayload(payload)
+	// Source of truth: https://github.com/vinikjkkj/zapo/blob/3c594911144e09951bd58f084f40162145bde9cc/packages/voip/src/call/WaCallMediaSession.ts#L122-L125
+	if frameCount == 0 {
+		frameCount = 1
+	}
+	if firstFrame == nil {
+		firstFrame = payload
+	}
+	dtx := IsOpusDtxPayload(firstFrame)
+	priming := IsOpusPrimingPayload(firstFrame)
 	speech := !dtx && !priming
 	useMarker := marker || (speech && !s.speechStarted)
 	if speech {
@@ -518,8 +532,8 @@ func (s *RtpStream) NextPacket(payload []byte, marker bool) RtpHeader {
 		ExtensionWord:  s.resolveWarpExtension(dtx),
 	}
 	s.seq++
-	s.timestamp += s.samplesPerPacket
-	s.log.Trace().Uint32("ssrc", s.Ssrc).Uint16("seq", header.SequenceNumber).Uint32("timestamp", header.Timestamp).Bool("marker", useMarker).Bool("dtx", dtx).Bool("speech", speech).Int("opus_bytes", len(payload)).Msg("rtp next packet")
+	s.timestamp += s.samplesPerPacket * frameCount
+	s.log.Trace().Uint32("ssrc", s.Ssrc).Uint16("seq", header.SequenceNumber).Uint32("timestamp", header.Timestamp).Bool("marker", useMarker).Bool("dtx", dtx).Bool("speech", speech).Uint32("frames", frameCount).Int("opus_bytes", len(payload)).Msg("rtp next packet")
 	return header
 }
 

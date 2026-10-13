@@ -7,6 +7,17 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
 
 ## [Unreleased]
 
+### media/audio-bundling — `implemented`
+
+- Outbound MLow audio now bundles two 60 ms frames per RTP packet when the
+  peer's `voip_settings` carries `rc.maxfpp` of 2 or more with 60 ms frames,
+  as the official 1:1 client does. The first frame waits one tick for its
+  pair, the multiframe container (`0x92`, count, lengths, frames) is the one
+  the decoder already splits, and the packet's RTP timestamp spans both
+  frames. One frame per packet remains the default without that profile.
+  Tests cover the container bytes and the decoder roundtrip, the two-byte
+  length prefix, the timestamp span and the profile rule.
+
 ### media/video-keyframe-shape — `implemented`
 
 - A key frame whose SPS precedes its IDR now goes out as one STAP-A holding

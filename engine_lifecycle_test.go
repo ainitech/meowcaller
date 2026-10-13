@@ -633,3 +633,22 @@ func TestEnablingVideoAfterAcceptingPeerUpgradeHolds(t *testing.T) {
 		t.Fatalf("holdUntil = %v, want %v", sender.holdUntil, want)
 	}
 }
+
+func TestAudioFramesPerPacketFollowsMaxfppAndFrameMs(t *testing.T) {
+	cases := []struct {
+		name string
+		vs   *signaling.VoipSettings
+		want int
+	}{
+		{"nil settings", nil, 1},
+		{"official profile", &signaling.VoipSettings{MaxFramesPerPacket: 2, FrameMs: 60}, 2},
+		{"more than two is capped", &signaling.VoipSettings{MaxFramesPerPacket: 4, FrameMs: 60}, 2},
+		{"maxfpp 1", &signaling.VoipSettings{MaxFramesPerPacket: 1, FrameMs: 60}, 1},
+		{"other frame size", &signaling.VoipSettings{MaxFramesPerPacket: 2, FrameMs: 20}, 1},
+	}
+	for _, c := range cases {
+		if got := audioFramesPerPacket(c.vs); got != c.want {
+			t.Errorf("%s: got %d, want %d", c.name, got, c.want)
+		}
+	}
+}

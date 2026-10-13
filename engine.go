@@ -56,6 +56,7 @@ type engineCall struct {
 	direction         CallDirection
 	codec             AudioCodec                   // audio codec for this call, selected from voip_settings (MLow default)
 	rtcpIntervalMs    int                          // server RTCP cadence from voip_settings; 0 = compiled default
+	audioFramesPerPkt int                          // MLow frames bundled per outbound audio packet (voip_settings rc.maxfpp); 0 = one
 	rtcpRembDisabled  bool                         // server turned REMB over RTCP off (voip_settings vid_rc.disable_rtcp_remb)
 	peerMuteSeen      bool                         // the peer's first <mute_v2> arrived (it is ready to receive video)
 	peerVideoPending  bool                         // we accepted the peer's upgrade; its <video state=1> is still to come
@@ -1065,13 +1066,27 @@ func (e *engine) applyVoipSettingsCodec(m *engineCall, node *waBinary.Node, call
 	// Source of truth: https://github.com/vinikjkkj/zapo/blob/87dd5b0cdd5e7e0c40b209b3bc7d47b0043d2349/packages/voip-media/src/call/WaCallMediaPlane.ts#L613-L627
 	m.rtcpIntervalMs = vs.RtcpIntervalMs
 	m.rtcpRembDisabled = vs.DisableRtcpRemb
+	m.audioFramesPerPkt = audioFramesPerPacket(vs)
 	e.c.log.Info().
 		Str("call_id", callID).
 		Str("codec", m.codec.String()).
 		Bool("use_mlow_codec_v1", vs.UseMlowCodecV1).
 		Int("rtcp_interval_ms", vs.RtcpIntervalMs).
 		Bool("disable_rtcp_remb", vs.DisableRtcpRemb).
+		Int("audio_frames_per_packet", m.audioFramesPerPkt).
 		Msg("applied voip_settings")
+}
+
+// maxAudioFramesPerPacket is the bundle the official 1:1 client sends at maxfpp 2; more is not sent.
+const maxAudioFramesPerPacket = 2
+
+// audioFramesPerPacket is rc.maxfpp capped at two, and one unless frame_ms is our 60 ms.
+func audioFramesPerPacket(vs *signaling.VoipSettings) int {
+	// Source of truth: https://github.com/vinikjkkj/zapo/blob/3c594911144e09951bd58f084f40162145bde9cc/packages/voip/src/call/WaCallMediaSession.ts#L122-L125
+	if vs == nil || vs.MaxFramesPerPacket < 2 || vs.FrameMs != 60 {
+		return 1
+	}
+	return maxAudioFramesPerPacket
 }
 
 // onCallAck handles an <ack class="call"> node. For an outbound offer the relay

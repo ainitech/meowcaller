@@ -273,11 +273,17 @@ func NewMediaPipeline(callKey []byte, selfJID, peerJID string, ssrc, samplesPerP
 // ProtectAudio wraps an Opus payload in an RTP WARP header, E2E-SRTP encrypts, and
 // appends the WARP MI tag.
 func (p *MediaPipeline) ProtectAudio(opusPayload []byte) ([]byte, error) {
+	return p.ProtectAudioBundle(opusPayload, opusPayload, 1)
+}
+
+// ProtectAudioBundle is ProtectAudio for a payload bundling frameCount audio frames, with
+// firstFrame (the first bundled frame) deciding DTX/speech and the marker.
+func (p *MediaPipeline) ProtectAudioBundle(opusPayload, firstFrame []byte, frameCount uint32) ([]byte, error) {
 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4e6ba4610e054e9ede3af1d5e88a83faee/src/voip/session.rs#L136-L150
 	// Source of truth: https://github.com/purpshell/meowcaller/blob/cbe1446dabb5842362b1a4362d4100ec15d8254f/datasheets/group-media-key-epoch.md#L122-L136
 	p.sendMu.Lock()
 	defer p.sendMu.Unlock()
-	header := p.stream.NextPacket(opusPayload, false)
+	header := p.stream.NextPacketSpanning(opusPayload, firstFrame, false, frameCount)
 	roc := p.sendRoc.Advance(header.SequenceNumber)
 	packet := rtp.EncodeRtpHeader(&header)
 	encrypted, err := srtp.CryptPayload(&p.sendKeys, header.Ssrc, header.SequenceNumber, roc, opusPayload)
