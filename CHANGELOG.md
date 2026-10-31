@@ -7,6 +7,19 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
 
 ## [Unreleased]
 
+### media/relay-downlink-watchdog — `implemented`
+
+- An accepted 1:1 call whose relay leg stops delivering the peer while its
+  pongs and allocates are still answered now recovers on its own: after 5 s
+  without authenticated RTP, SRTCP or app-data the stall is logged (the
+  keepalive already re-sends the allocate every second), and 5 s later the
+  relay is redialled on a fresh DataChannel, with the wait doubling and at
+  most three redials per call. The new leg is swapped under a `relayLink`
+  so senders, the receive loop and the SRTP sessions continue untouched. The
+  watchdog arms only once the peer accepted (or, inbound, after its first
+  `mute_v2`), so a ringing call never redials. Unit tests cover the schedule,
+  the stall reset, and the receiver moving to the redialled leg.
+
 ### media/audio-bundling — `implemented`
 
 - Outbound MLow audio now bundles two 60 ms frames per RTP packet when the

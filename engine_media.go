@@ -107,6 +107,30 @@ func (e *engine) maybeStartMedia(callID string) {
 	}()
 }
 
+// dialRelayChannel opens the relay DataChannel, bounded by the DTLS handshake timeout.
+func dialRelayChannel(ctx context.Context, addr *net.UDPAddr, log zerolog.Logger) (*relay.RelayMediaChannel, error) {
+	type result struct {
+		ch  *relay.RelayMediaChannel
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		ch, err := relay.ConnectRelayMedia(addr, relay.WithLogger(log))
+		done <- result{ch, err}
+	}()
+	select {
+	case r := <-done:
+		if r.err != nil {
+			return nil, fmt.Errorf("relay connect: %w", r.err)
+		}
+		return r.ch, nil
+	case <-time.After(12 * time.Second):
+		return nil, fmt.Errorf("relay connect timed out (DTLS didn't complete)")
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 // connectAndAllocate opens the relay DataChannel and sends the STUN allocate, returning
 // the channel and the allocate bytes (re-sent by the keepalive).
 //
@@ -124,26 +148,9 @@ func (e *engine) connectAndAllocate(ctx context.Context, rd *relayData, streamSs
 		"ipv4": ep.addresses[0].ipv4, "port": ep.addresses[0].port, "token_id": ep.tokenID,
 	})
 
-	type result struct {
-		ch  *relay.RelayMediaChannel
-		err error
-	}
-	done := make(chan result, 1)
-	go func() {
-		ch, err := relay.ConnectRelayMedia(addr, relay.WithLogger(log))
-		done <- result{ch, err}
-	}()
-	var ch *relay.RelayMediaChannel
-	select {
-	case r := <-done:
-		if r.err != nil {
-			return nil, nil, fmt.Errorf("relay connect: %w", r.err)
-		}
-		ch = r.ch
-	case <-time.After(12 * time.Second):
-		return nil, nil, fmt.Errorf("relay connect timed out (DTLS didn't complete)")
-	case <-ctx.Done():
-		return nil, nil, ctx.Err()
+	ch, err := dialRelayChannel(ctx, addr, log)
+	if err != nil {
+		return nil, nil, err
 	}
 	log.Info().Str("relay_name", ep.relayName).Msg("relay DataChannel open")
 
@@ -179,6 +186,55 @@ func (e *engine) connectAndAllocate(ctx context.Context, rd *relayData, streamSs
 		"stream_ssrcs": streamSsrcs,
 	})
 	return ch, allocate, nil
+}
+
+// callAccepted reports whether the peer is on the call: the caller's accept arrived, or on
+// an inbound call the caller's first <mute_v2>, which is what triggers our accept.
+func (e *engine) callAccepted(callID string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	m := e.calls[callID]
+	if m == nil || m.call == nil {
+		return false
+	}
+	if m.direction == CallDirectionIncoming {
+		return m.peerMuteSeen
+	}
+	m.call.mu.Lock()
+	defer m.call.mu.Unlock()
+	return m.call.peerAccepted
+}
+
+// redialRelay opens a fresh leg to the relay this call dials, sends the current allocate
+// and a ping on it, and swaps it under the link; the SRTP sessions are untouched.
+func (e *engine) redialRelay(ctx context.Context, callID string, rd *relayData, inbound bool, link *relayLink, allocateState *groupRelayAllocateState, attempt int, log zerolog.Logger) {
+	// Source of truth: https://github.com/vinikjkkj/zapo/blob/bceb268c846763a2cd0b494da830a54aacdc3818/packages/voip-media/src/relay/WaSctpRelay.ts#L638-L655
+	ep := getMediaRelayEndpoint(rd, inbound)
+	if ep == nil || len(ep.addresses) == 0 {
+		return
+	}
+	addr := &net.UDPAddr{IP: net.ParseIP(ep.addresses[0].ipv4), Port: int(ep.addresses[0].port)}
+	log.Warn().Str("call_id", callID).Str("relay_name", ep.relayName).Int("attempt", attempt).Msg("relay downlink still stalled; redialling the relay")
+	e.c.diag.Emit("relay", map[string]any{"event": "redial", "call_id": callID, "relay_name": ep.relayName, "attempt": attempt})
+	leg, err := dialRelayChannel(ctx, addr, log)
+	if err != nil {
+		log.Warn().Err(err).Str("call_id", callID).Int("attempt", attempt).Msg("relay redial failed; keeping the current leg")
+		return
+	}
+	if err := allocateState.SendCurrent(func(packet []byte) error {
+		_, sendErr := leg.Send(packet)
+		return sendErr
+	}); err != nil {
+		log.Warn().Err(err).Str("call_id", callID).Msg("allocate on the redialled leg failed; keeping the current leg")
+		_ = leg.Close()
+		return
+	}
+	var tx [12]byte
+	_, _ = rand.Read(tx[:])
+	ping := stun.BuildWhatsappPing(tx, log)
+	_, _ = leg.Send(ping[:])
+	link.swap(leg)
+	log.Info().Str("call_id", callID).Str("relay_name", ep.relayName).Int("attempt", attempt).Msg("relay redialled; media continues on the new leg")
 }
 
 // runMedia runs the per-frame media loop over the relay DataChannel: the Player's frames
@@ -220,10 +276,13 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 	if err != nil {
 		return err
 	}
-	ch, allocate, err := e.connectAndAllocate(ctx, rd, streamSsrcs, inbound)
+	leg, allocate, err := e.connectAndAllocate(ctx, rd, streamSsrcs, inbound)
 	if err != nil {
 		return err
 	}
+	ch := newRelayLink(leg)
+	var watchdog downlinkWatchdog
+	var redialInFlight atomic.Bool
 	defer ch.Close()
 	allocateState := newGroupRelayAllocateStateWithHBHFEC(
 		allocate,
@@ -553,6 +612,23 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 				"event": "keepalive", "tick": tickCount,
 				"tx_id_hex": hex.EncodeToString(tx[:]), "ping_hex": hex.EncodeToString(ping[:]),
 			})
+			// Source of truth: https://github.com/vinikjkkj/zapo/blob/bceb268c846763a2cd0b494da830a54aacdc3818/packages/voip-media/src/relay/WaSctpRelay.ts#L620-L655
+			if !groupMode.Load() && e.callAccepted(callID) {
+				switch action, attempt := watchdog.tick(time.Now()); action {
+				case downlinkReallocate:
+					log.Warn().Str("call_id", callID).Dur("stalled", downlinkReallocateAfter).Msg("relay downlink stalled; allocate keeps being re-sent, redial follows")
+					e.c.diag.Emit("relay", map[string]any{"event": "downlink_stalled", "call_id": callID})
+				case downlinkRedial:
+					// The dial can block for the DTLS timeout; the keepalive must keep feeding
+					// the current leg meanwhile, and one redial at a time is enough.
+					if redialInFlight.CompareAndSwap(false, true) {
+						go func(attempt int) {
+							defer redialInFlight.Store(false)
+							e.redialRelay(ctx, callID, rd, inbound, ch, allocateState, attempt, log)
+						}(attempt)
+					}
+				}
+			}
 		}
 	}()
 
@@ -917,6 +993,9 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 				continue
 			}
 			plain, index, ok := audioReceivers.UnprotectSRTCP(senderSsrc, pkt)
+			if ok {
+				watchdog.notePeerMedia()
+			}
 			if !ok {
 				if rtcpAuthFail++; rtcpAuthFail == 1 {
 					log.Warn().Uint32("ssrc", senderSsrc).Msg("peer SRTCP failed authentication")
@@ -995,6 +1074,9 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 		kind := classifyMediaPayload(vh)
 		if kind == mediaPayloadAppData {
 			media, ok := audioReceivers.UnprotectAppData(pkt)
+			if ok {
+				watchdog.notePeerMedia()
+			}
 			if !ok {
 				if appDataUnprotectFail++; appDataUnprotectFail == 1 {
 					log.Warn().Uint32("ssrc", vh.Ssrc).Uint16("seq", vh.SequenceNumber).Msg("app-data RTP arrived but failed to unprotect")
@@ -1032,6 +1114,9 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 		// Source of truth: https://github.com/JotaDev66/WaCalls/blob/2d6a1f666426049a89ef9541414e771acdcf8a16/internal/voip/call/callmanager_video.go#L86-L126
 		if kind == mediaPayloadVideo {
 			media, vunok := audioReceivers.UnprotectVideo(pkt)
+			if vunok {
+				watchdog.notePeerMedia()
+			}
 			if !vunok {
 				if videoUnprotectFail++; videoUnprotectFail == 1 {
 					log.Warn().
@@ -1149,6 +1234,9 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 			continue
 		}
 		audio, ok := audioReceivers.DecodeAudio(pkt)
+		if ok {
+			watchdog.notePeerMedia()
+		}
 		if !ok {
 			if unprotectFail++; unprotectFail == 1 {
 				log.Warn().Uint32("ssrc", vh.Ssrc).Int("bytes", n).Msg("audio RTP did not match an authenticated active participant")
@@ -1351,7 +1439,7 @@ type videoSender struct {
 	mu               sync.Mutex
 	pipe             *MediaPipeline
 	stream           *rtp.VideoRtpStream
-	ch               *relay.RelayMediaChannel
+	ch               *relayLink
 	ssrc             uint32
 	callID           string
 	frame            uint64
